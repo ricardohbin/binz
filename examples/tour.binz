@@ -1,0 +1,107 @@
+// ---------------------------------------------------------------- structs
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+struct Line {
+    from: Point,   // nested by value, laid out flat like in C
+    to: Point,
+    label: str,
+}
+
+// ------------------------------------------------------------------ funcs
+
+function add(a: i64, b: i64): i64 {
+    return a + b;
+}
+
+function mul(a: i64, b: i64): i64 {
+    return a * b;
+}
+
+// functions are values: this one takes one and calls it
+function apply(op: function(i64, i64): i64, a: i64, b: i64): i64 {
+    return op(a, b);
+}
+
+// pointers: mutate the caller's struct in place
+function shift(p: *Point, dx: i64, dy: i64): void {
+    (*p).x = (*p).x + dx;
+    (*p).y = (*p).y + dy;
+    return;
+}
+
+// structs are passed and returned by value
+function midpoint(l: Line): Point {
+    return Point {
+        x: (l.from.x + l.to.x) / 2,
+        y: (l.from.y + l.to.y) / 2,
+    };
+}
+
+function show(name: str, p: Point): void {
+    print(name + " = (" + cast<str>(p.x) + ", " + cast<str>(p.y) + ")");
+    return;
+}
+
+function fib(n: i64): i64 {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+function main(): i32 {
+    // const is immutable, var is mutable; the type is always written out
+    const greeting: str = "-- binZ tour --";
+    print(greeting);
+
+    var i: i64 = 0;
+    var total: i64 = 0;
+    while (i < 10) {
+        total = total + i;
+        i = i + 1;
+    }
+    print("sum 0..9 = " + cast<str>(total));
+
+    // no implicit conversions anywhere: cast<T>() is the only way
+    const ratio: f64 = cast<f64>(total) / 4.0;
+    print("ratio = " + cast<str>(ratio));
+    print("truncated = " + cast<str>(cast<i32>(ratio)));
+
+    // functions as first-class values
+    const op: function(i64, i64): i64 = mul;
+    print("apply(mul, 6, 7) = " + cast<str>(apply(op, 6, 7)));
+    print("apply(add, 6, 7) = " + cast<str>(apply(add, 6, 7)));
+
+    // print itself is just a value of type function(str): void
+    const say: function(str): void = print;
+    say("called through a function variable");
+
+    // structs, pointers and value copies
+    var a: Point = Point { x: 1, y: 2 };
+    var b: Point = a;          // full copy, not an alias
+    const pa: *Point = &a;
+    shift(pa, 10, 20);
+    show("a (shifted)", a);
+    show("b (untouched copy)", b);
+
+    var line: Line = Line {
+        from: a,
+        to: Point { x: 0, y: 0 },
+        label: "diagonal",
+    };
+    show(line.label, midpoint(line));
+
+    print("fib(20) = " + cast<str>(fib(20)));
+
+    if (total > 40 && ratio < 100.0) {
+        print("conditions hold");
+    } else {
+        print("unreachable");
+    }
+
+    return 0;
+}
