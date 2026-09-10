@@ -1,0 +1,12 @@
+[package]
+name = "binz"
+version = "0.1.0"
+edition = "2021"
+description = "binZ: a small, strongly typed, compiled language with a Rust backend"
+
+[[bin]]
+name = "binz"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
