@@ -1,0 +1,2 @@
+# binz
+a simple language
