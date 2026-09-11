@@ -1,6 +1,6 @@
 # binZ
 
-Yeah. It comes. In my birthday, thinking about the moment we are living (september 2026), in a rainy afternoon in office and created the first scratch of MY language. 
+Yeah. It comes. In my birthday, thinking about the moment we are living (september 2026), in a rainy afternoon in office, I created the first scratch of MY language. 
 
 Few minutes talking with claude. After 15 minutes, the first version is done.
 

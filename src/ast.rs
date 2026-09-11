@@ -1,16 +1,25 @@
 use crate::lexer::Span;
+use crate::types::Kind;
 
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Name(String, Span),
     Ptr(Box<TypeExpr>, Span),
     Fn(Vec<TypeExpr>, Box<TypeExpr>, Span),
+    /// `[T; N]`
+    Array(Box<TypeExpr>, u32, Span),
+    /// `Vector<T>`, `LinkedList<T>`, `Set<T>`, `SortedSet<T>`
+    Container(Kind, Box<TypeExpr>, Span),
 }
 
 impl TypeExpr {
     pub fn span(&self) -> Span {
         match self {
-            TypeExpr::Name(_, s) | TypeExpr::Ptr(_, s) | TypeExpr::Fn(_, _, s) => *s,
+            TypeExpr::Name(_, s)
+            | TypeExpr::Ptr(_, s)
+            | TypeExpr::Fn(_, _, s)
+            | TypeExpr::Array(_, _, s)
+            | TypeExpr::Container(_, _, s) => *s,
         }
     }
 }
@@ -163,6 +172,30 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+    /// `c[i]`, the one way to reach an element of any container.
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
+    /// `[a, b, c]`
+    ArrayLit {
+        elems: Vec<Expr>,
+        span: Span,
+    },
+    /// `[x; N]`
+    ArrayRepeat {
+        value: Box<Expr>,
+        count: u32,
+        span: Span,
+    },
+    /// `Vector<i32>{ 1, 2, 3 }`
+    ContainerLit {
+        kind: Kind,
+        elem: TypeExpr,
+        elems: Vec<Expr>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -178,7 +211,11 @@ impl Expr {
             | Expr::Call { span: s, .. }
             | Expr::Field { span: s, .. }
             | Expr::StructLit { span: s, .. }
-            | Expr::Cast { span: s, .. } => *s,
+            | Expr::Cast { span: s, .. }
+            | Expr::Index { span: s, .. }
+            | Expr::ArrayLit { span: s, .. }
+            | Expr::ArrayRepeat { span: s, .. }
+            | Expr::ContainerLit { span: s, .. } => *s,
         }
     }
 
