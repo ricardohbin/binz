@@ -1,6 +1,6 @@
 # binZ
 
-**DISCLAIMER**: only HUMANS.md and SOUL.md contains stuff created by human. 
+**DISCLAIMER**: only HUMANS.md and SOUL.md contains stuff created by human. You can see some real thoughts there. Ah, all the PR and commits are made by me too (the human, in the case :P)
 
 A small, strongly typed, compiled language. C/C++/JavaScript-shaped syntax,
 Rust backend, bytecode artifact plus a stack VM that executes it.
