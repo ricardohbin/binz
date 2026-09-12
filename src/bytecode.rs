@@ -23,6 +23,11 @@ pub const OP_STORE_PTR: u8 = 0x14;
 pub const OP_FIELD: u8 = 0x15;
 pub const OP_COPY: u8 = 0x16;
 pub const OP_COPY_SRET: u8 = 0x17;
+/// `[elem_size: u32, len: u32]` -- pops an index and a base address, pushes
+/// the address of that element after a bounds check.
+pub const OP_ELEM: u8 = 0x18;
+/// `[len: u32]` -- linear search of a fixed array of one-slot elements.
+pub const OP_ARR_FIND: u8 = 0x19;
 
 pub const OP_ADD: u8 = 0x20;
 pub const OP_SUB: u8 = 0x21;
@@ -48,6 +53,53 @@ pub const OP_CALL: u8 = 0x50;
 pub const OP_RET: u8 = 0x51;
 
 pub const OP_CAST: u8 = 0x60;
+
+/// `[kind: u8, count: u32]` -- pops `count` values, pushes a new container.
+pub const OP_NEW: u8 = 0x70;
+/// Pops an index and a container, pushes the element.
+pub const OP_GET: u8 = 0x71;
+/// Pops a value, an index and a container, and stores.
+pub const OP_SET: u8 = 0x72;
+/// `[builtin: u8]` -- pops that builtin's arguments, pushes its result.
+pub const OP_BUILTIN: u8 = 0x73;
+
+pub const KIND_VECTOR: u8 = 0;
+pub const KIND_LIST: u8 = 1;
+pub const KIND_SET: u8 = 2;
+pub const KIND_SORTED_SET: u8 = 3;
+
+pub const B_LEN: u8 = 0;
+pub const B_FIND: u8 = 1;
+pub const B_PUSH: u8 = 2;
+pub const B_POP: u8 = 3;
+pub const B_INSERT: u8 = 4;
+pub const B_ERASE: u8 = 5;
+pub const B_ADD: u8 = 6;
+pub const B_REMOVE: u8 = 7;
+pub const B_CONTAINS: u8 = 8;
+pub const B_CLEAR: u8 = 9;
+pub const B_COPY: u8 = 10;
+
+/// Name and argument count of every container builtin. These are special
+/// forms: they are generic over the element type, so unlike `print` they are
+/// not first-class values.
+pub const BUILTINS: &[(&str, u8, usize)] = &[
+    ("len", B_LEN, 1),
+    ("find", B_FIND, 2),
+    ("push", B_PUSH, 2),
+    ("pop", B_POP, 1),
+    ("insert", B_INSERT, 3),
+    ("erase", B_ERASE, 2),
+    ("add", B_ADD, 2),
+    ("remove", B_REMOVE, 2),
+    ("contains", B_CONTAINS, 2),
+    ("clear", B_CLEAR, 1),
+    ("copy", B_COPY, 1),
+];
+
+pub fn builtin_name(id: u8) -> &'static str {
+    BUILTINS.iter().find(|b| b.1 == id).map(|b| b.0).unwrap_or("?")
+}
 
 pub const CAST_I32: u8 = 0;
 pub const CAST_I64: u8 = 1;
@@ -286,6 +338,36 @@ pub fn disassemble(m: &Module) -> String {
                     };
                     format!("cast {}", name)
                 }
+                OP_ELEM => {
+                    let size = rd_u32(code, pc);
+                    let len = rd_u32(code, pc + 4);
+                    pc += 8;
+                    format!("elem {} {}", size, len)
+                }
+                OP_ARR_FIND => {
+                    let len = rd_u32(code, pc);
+                    pc += 4;
+                    format!("arr.find {}", len)
+                }
+                OP_NEW => {
+                    let kind = code[pc];
+                    let count = rd_u32(code, pc + 1);
+                    pc += 5;
+                    let name = match kind {
+                        KIND_VECTOR => "Vector",
+                        KIND_LIST => "LinkedList",
+                        KIND_SET => "Set",
+                        _ => "SortedSet",
+                    };
+                    format!("new {} {}", name, count)
+                }
+                OP_BUILTIN => {
+                    let id = code[pc];
+                    pc += 1;
+                    format!("builtin {}", builtin_name(id))
+                }
+                OP_GET => "get".into(),
+                OP_SET => "set".into(),
                 OP_LOAD_PTR => "load.ptr".into(),
                 OP_STORE_PTR => "store.ptr".into(),
                 OP_ADD => "add".into(),

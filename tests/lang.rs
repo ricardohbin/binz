@@ -259,3 +259,246 @@ fn traps_on_overflow() {
     let e = run_err("overflow", &in_main("var a: i32 = 2147483647; print(cast<str>(a + a));"));
     assert!(e.contains("overflow"), "{}", e);
 }
+
+// ------------------------------------------------------------- containers
+
+#[test]
+fn fixed_arrays_are_values() {
+    let out = run_ok(
+        "arrays",
+        &in_main(
+            r#"
+            var a: [i32; 4] = [10, 20, 30, 40];
+            a[2] = 99;
+            var b: [i32; 4] = a;
+            b[0] = 1;
+            print(cast<str>(a[0]) + " " + cast<str>(a[2]) + " " + cast<str>(len(a)));
+            print(cast<str>(find(a, 40)) + " " + cast<str>(find(a, 7)));
+            var zeros: [i64; 5] = [0; 5];
+            zeros[4] = 7;
+            print(cast<str>(zeros[0]) + " " + cast<str>(zeros[4]));
+        "#,
+        ),
+    );
+    assert_eq!(out, "10 99 4\n3 -1\n0 7\n");
+}
+
+#[test]
+fn arrays_nest_in_structs_and_functions() {
+    let out = run_ok(
+        "arraynest",
+        r#"
+        struct P { x: i64, y: i64 }
+        struct Grid { cells: [i32; 3], corners: [P; 2] }
+
+        function total(a: [i32; 3]): i32 {
+            var i: i32 = 0;
+            var sum: i32 = 0;
+            while (i < len(a)) { sum = sum + a[i]; i = i + 1; }
+            return sum;
+        }
+
+        function ramp(): [i32; 3] {
+            var out: [i32; 3] = [0; 3];
+            out[1] = 2;
+            out[2] = 4;
+            return out;
+        }
+
+        function main(): i32 {
+            var g: Grid = Grid { cells: [1, 2, 3], corners: [P { x: 0, y: 0 }, P { x: 9, y: 9 }] };
+            g.cells[1] = 20;
+            g.corners[1].x = 77;
+            print(cast<str>(g.cells[1]) + " " + cast<str>(g.corners[1].x) + " " + cast<str>(g.corners[0].x));
+            print(cast<str>(total([2, 4, 6])));
+            const r: [i32; 3] = ramp();
+            print(cast<str>(r[0]) + cast<str>(r[1]) + cast<str>(r[2]));
+            var m: [[i32; 2]; 3] = [[0; 2]; 3];
+            m[2][1] = 5;
+            print(cast<str>(m[2][1]) + cast<str>(m[0][1]));
+            var nums: [i32; 3] = [1, 2, 3];
+            const p: *i32 = &nums[1];
+            *p = 100;
+            print(cast<str>(nums[1]));
+            return 0;
+        }
+        "#,
+    );
+    assert_eq!(out, "20 77 0\n12\n024\n50\n100\n");
+}
+
+#[test]
+fn vector_grows_and_shrinks() {
+    let out = run_ok(
+        "vector",
+        &in_main(
+            r#"
+            var v: Vector<str> = Vector<str>{};
+            push(v, "one");
+            push(v, "two");
+            push(v, "three");
+            v[1] = "TWO";
+            insert(v, 0, "zero");
+            print(v[0] + " " + v[1] + " " + v[2] + " " + v[3]);
+            print(erase(v, 0) + " " + pop(v) + " " + cast<str>(len(v)));
+            print(cast<str>(find(v, "TWO")) + " " + cast<str>(find(v, "nope")));
+            clear(v);
+            print(cast<str>(len(v)));
+        "#,
+        ),
+    );
+    assert_eq!(out, "zero one TWO three\nzero three 2\n1 -1\n0\n");
+}
+
+#[test]
+fn linked_list_walks_from_both_ends() {
+    let out = run_ok(
+        "list",
+        &in_main(
+            r#"
+            var l: LinkedList<i32> = LinkedList<i32>{1, 2, 3};
+            insert(l, 0, 0);
+            push(l, 4);
+            var i: i32 = 0;
+            var line: str = "";
+            while (i < len(l)) { line = line + cast<str>(l[i]); i = i + 1; }
+            print(line);
+            print(cast<str>(erase(l, 2)) + " " + cast<str>(pop(l)) + " " + cast<str>(len(l)));
+            print(cast<str>(find(l, 4)) + " " + cast<str>(l[len(l) - 1]));
+        "#,
+        ),
+    );
+    assert_eq!(out, "01234\n2 4 3\n-1 3\n");
+}
+
+#[test]
+fn sets_hold_each_key_once() {
+    let out = run_ok(
+        "sets",
+        &in_main(
+            r#"
+            var s: Set<str> = Set<str>{"b", "a", "b"};
+            print(cast<str>(add(s, "c")) + " " + cast<str>(add(s, "a")) + " " + cast<str>(len(s)));
+            print(cast<str>(contains(s, "a")) + " " + cast<str>(remove(s, "b")) + " " + cast<str>(contains(s, "b")));
+            print(s[0] + s[1]);
+            var t: SortedSet<i32> = SortedSet<i32>{5, 1, 4, 1};
+            add(t, 3);
+            var i: i32 = 0;
+            var line: str = "";
+            while (i < len(t)) { line = line + cast<str>(t[i]); i = i + 1; }
+            print(line);
+        "#,
+        ),
+    );
+    assert_eq!(out, "true false 3\ntrue true false\nac\n1345\n");
+}
+
+#[test]
+fn containers_are_handles_and_copy_is_explicit() {
+    let out = run_ok(
+        "handles",
+        r#"
+        function fill(v: Vector<i32>): void {
+            push(v, 3);
+            return;
+        }
+        function main(): i32 {
+            var u: Vector<i32> = Vector<i32>{1, 2};
+            var alias: Vector<i32> = u;
+            var snapshot: Vector<i32> = copy(u);
+            fill(u);
+            print(cast<str>(len(u)) + " " + cast<str>(len(alias)) + " " + cast<str>(len(snapshot)));
+            var rows: Vector<Vector<i32>> = Vector<Vector<i32>>{};
+            push(rows, Vector<i32>{1, 2});
+            push(rows[0], 9);
+            print(cast<str>(len(rows[0])) + " " + cast<str>(rows[0][2]));
+            return 0;
+        }
+        "#,
+    );
+    assert_eq!(out, "3 3 2\n3 9\n");
+}
+
+#[test]
+fn len_also_answers_for_str() {
+    let out = run_ok("strlen", &in_main("print(cast<str>(len(\"hello\")));"));
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn user_names_shadow_container_builtins() {
+    let out = run_ok(
+        "shadow",
+        "function add(a: i32, b: i32): i32 { return a + b; }
+         function main(): i32 { print(cast<str>(add(2, 3))); return 0; }",
+    );
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn rejects_wrong_array_literal_length() {
+    let e = run_err("arrlen", &in_main("const a: [i32; 3] = [1, 2];"));
+    assert!(e.contains("needs 3 element(s)"), "{}", e);
+}
+
+#[test]
+fn rejects_array_literal_without_a_type() {
+    let e = run_err("arrhint", &in_main("print(cast<str>([1, 2]));"));
+    assert!(e.contains("needs a declared type"), "{}", e);
+}
+
+#[test]
+fn rejects_the_wrong_builtin_for_the_container() {
+    let e = run_err("wrongop", &in_main("var s: Set<i32> = Set<i32>{}; push(s, 1);"));
+    assert!(e.contains("use `add`"), "{}", e);
+    let e = run_err("wrongop2", &in_main("var v: Vector<i32> = Vector<i32>{}; add(v, 1);"));
+    assert!(e.contains("use `push`"), "{}", e);
+    let e = run_err("wrongop3", &in_main("var a: [i32; 1] = [1]; push(a, 2);"));
+    assert!(e.contains("never changes size"), "{}", e);
+}
+
+#[test]
+fn rejects_assigning_into_a_set() {
+    let e = run_err("setassign", &in_main("var s: Set<i32> = Set<i32>{1}; s[0] = 2;"));
+    assert!(e.contains("are its keys"), "{}", e);
+}
+
+#[test]
+fn rejects_a_struct_inside_a_heap_container() {
+    let e = run_err(
+        "structelem",
+        "struct P { x: i32 }
+         function main(): i32 { var v: Vector<P> = Vector<P>{}; return 0; }",
+    );
+    assert!(e.contains("one-slot values"), "{}", e);
+    let e = run_err("setelem", &in_main("var s: Set<Vector<i32>> = Set<Vector<i32>>{};"));
+    assert!(e.contains("holds keys"), "{}", e);
+}
+
+#[test]
+fn rejects_taking_the_address_of_a_heap_element() {
+    let e = run_err(
+        "heapaddr",
+        &in_main("var v: Vector<i32> = Vector<i32>{1}; const p: *i32 = &v[0];"),
+    );
+    assert!(e.contains("has no address"), "{}", e);
+}
+
+#[test]
+fn traps_on_out_of_range_index() {
+    let e = run_err("arroob", &in_main("var a: [i32; 2] = [1, 2]; print(cast<str>(a[5]));"));
+    assert!(e.contains("out of range for an array of length 2"), "{}", e);
+    let e = run_err("vecoob", &in_main("var v: Vector<i32> = Vector<i32>{1}; print(cast<str>(v[3]));"));
+    assert!(e.contains("out of range for a Vector of length 1"), "{}", e);
+    let e = run_err("emptypop", &in_main("var v: Vector<i32> = Vector<i32>{}; print(cast<str>(pop(v)));"));
+    assert!(e.contains("pop on an empty Vector"), "{}", e);
+}
+
+#[test]
+fn traps_on_nan_as_a_set_key() {
+    let e = run_err(
+        "nankey",
+        &in_main("var s: SortedSet<f64> = SortedSet<f64>{}; var z: f64 = 0.0; add(s, z / z);"),
+    );
+    assert!(e.contains("NaN"), "{}", e);
+}

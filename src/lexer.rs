@@ -1,4 +1,5 @@
 use crate::error::{CResult, CompileError};
+use crate::types::Kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
@@ -27,12 +28,17 @@ pub enum Tok {
     Cast,
     True,
     False,
+    /// `Vector` / `LinkedList` / `Set` / `SortedSet`: reserved type names, so
+    /// `Vector<i32>` never has to be disambiguated from a comparison.
+    Container(Kind),
 
     // punctuation
     LParen,
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Comma,
     Semi,
     Colon,
@@ -82,10 +88,13 @@ pub fn describe(t: &Tok) -> String {
         Tok::Cast => "cast".into(),
         Tok::True => "true".into(),
         Tok::False => "false".into(),
+        Tok::Container(k) => k.name().into(),
         Tok::LParen => "(".into(),
         Tok::RParen => ")".into(),
         Tok::LBrace => "{".into(),
         Tok::RBrace => "}".into(),
+        Tok::LBracket => "[".into(),
+        Tok::RBracket => "]".into(),
         Tok::Comma => ",".into(),
         Tok::Semi => ";".into(),
         Tok::Colon => ":".into(),
@@ -206,7 +215,10 @@ impl Lexer {
                     "cast" => Tok::Cast,
                     "true" => Tok::True,
                     "false" => Tok::False,
-                    _ => Tok::Ident(s),
+                    _ => match Kind::from_name(&s) {
+                        Some(k) => Tok::Container(k),
+                        None => Tok::Ident(s),
+                    },
                 }
             } else if c.is_ascii_digit() {
                 let mut s = String::new();
@@ -268,6 +280,8 @@ impl Lexer {
                     ')' => Tok::RParen,
                     '{' => Tok::LBrace,
                     '}' => Tok::RBrace,
+                    '[' => Tok::LBracket,
+                    ']' => Tok::RBracket,
                     ',' => Tok::Comma,
                     ';' => Tok::Semi,
                     ':' => Tok::Colon,

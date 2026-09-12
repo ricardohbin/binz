@@ -6,6 +6,7 @@
 use std::rc::Rc;
 
 use crate::bytecode::*;
+use crate::obj::{self, Handle};
 use crate::types::Type;
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,8 @@ pub enum Value {
     Ptr(usize),
     Fn(u32),
     Native(u32),
+    /// A handle to a `Vector` / `LinkedList` / `Set` / `SortedSet`.
+    Obj(Handle),
     Void,
 }
 
@@ -104,16 +107,38 @@ impl Vm {
             pc += 1;
 
             let mut u32_operand = 0u32;
+            let mut u32_second = 0u32;
             let mut u8_operand = 0u8;
             match op {
                 OP_PUSH_I32 | OP_PUSH_STR | OP_PUSH_FN | OP_PUSH_NATIVE | OP_LOAD_LOCAL
                 | OP_STORE_LOCAL | OP_ADDR_LOCAL | OP_FIELD | OP_COPY | OP_COPY_SRET | OP_CALL
-                | OP_JMP | OP_JMP_IF_FALSE | OP_JMP_IF_TRUE => {
+                | OP_JMP | OP_JMP_IF_FALSE | OP_JMP_IF_TRUE | OP_ARR_FIND => {
                     u32_operand =
                         u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
                     pc += 4;
                 }
-                OP_PUSH_BOOL | OP_CAST => {
+                OP_ELEM => {
+                    u32_operand =
+                        u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
+                    u32_second = u32::from_le_bytes([
+                        code[pc + 4],
+                        code[pc + 5],
+                        code[pc + 6],
+                        code[pc + 7],
+                    ]);
+                    pc += 8;
+                }
+                OP_NEW => {
+                    u8_operand = code[pc];
+                    u32_operand = u32::from_le_bytes([
+                        code[pc + 1],
+                        code[pc + 2],
+                        code[pc + 3],
+                        code[pc + 4],
+                    ]);
+                    pc += 5;
+                }
+                OP_PUSH_BOOL | OP_CAST | OP_BUILTIN => {
                     u8_operand = code[pc];
                     pc += 1;
                 }
@@ -186,6 +211,57 @@ impl Vm {
                         self.mem[d + k] = self.mem[s + k].clone();
                     }
                     self.stack.push(Value::Ptr(d));
+                }
+
+                OP_ELEM => {
+                    let idx = self.pop();
+                    let base = self.pop();
+                    let i = self.index_of(&idx, m)?;
+                    let len = u32_second as usize;
+                    if i >= len {
+                        rt!(self, m, "index {} is out of range for an array of length {}", i, len);
+                    }
+                    let a = self.as_ptr(base, m)?;
+                    self.stack.push(Value::Ptr(a + i * u32_operand as usize));
+                }
+                OP_ARR_FIND => {
+                    let needle = self.pop();
+                    let base = self.pop();
+                    let a = self.as_ptr(base, m)?;
+                    let mut found = -1i32;
+                    for k in 0..u32_operand as usize {
+                        if obj::value_eq(&self.mem[a + k], &needle) {
+                            found = k as i32;
+                            break;
+                        }
+                    }
+                    self.stack.push(Value::I32(found));
+                }
+                OP_NEW => {
+                    let at = self.stack.len() - u32_operand as usize;
+                    let values: Vec<Value> = self.stack.split_off(at);
+                    let v = self.checked(obj::new_container(u8_operand, values), m)?;
+                    self.stack.push(v);
+                }
+                OP_GET => {
+                    let idx = self.pop();
+                    let c = self.pop();
+                    let i = self.index_of(&idx, m)?;
+                    let h = self.as_obj(c, m)?;
+                    let v = self.checked(obj::obj_get(&h, i), m)?;
+                    self.stack.push(v);
+                }
+                OP_SET => {
+                    let v = self.pop();
+                    let idx = self.pop();
+                    let c = self.pop();
+                    let i = self.index_of(&idx, m)?;
+                    let h = self.as_obj(c, m)?;
+                    self.checked(obj::obj_set(&h, i, v), m)?;
+                }
+                OP_BUILTIN => {
+                    let v = self.builtin(u8_operand, m)?;
+                    self.stack.push(v);
                 }
 
                 OP_ADD | OP_SUB | OP_MUL | OP_DIV | OP_REM => {
@@ -301,6 +377,105 @@ impl Vm {
 
             self.frames.last_mut().unwrap().pc = pc;
         }
+    }
+
+    /// Wraps a container-layer failure as a runtime error in the current
+    /// function.
+    fn checked<T>(&self, r: Result<T, String>, m: &Module) -> Result<T, RuntimeError> {
+        match r {
+            Ok(v) => Ok(v),
+            Err(msg) => rt!(self, m, "{}", msg),
+        }
+    }
+
+    fn index_of(&self, v: &Value, m: &Module) -> Result<usize, RuntimeError> {
+        match v {
+            Value::I32(i) if *i >= 0 => Ok(*i as usize),
+            Value::I32(i) => rt!(self, m, "index {} is negative", i),
+            _ => rt!(self, m, "an index must be an i32"),
+        }
+    }
+
+    fn as_obj(&self, v: Value, m: &Module) -> Result<Handle, RuntimeError> {
+        match v {
+            Value::Obj(h) => Ok(h),
+            _ => rt!(self, m, "expected a container"),
+        }
+    }
+
+    fn builtin(&mut self, id: u8, m: &Module) -> Result<Value, RuntimeError> {
+        Ok(match id {
+            B_LEN => {
+                let c = self.pop();
+                match c {
+                    Value::Str(s) => Value::I32(s.chars().count() as i32),
+                    other => Value::I32(obj::obj_len(&self.as_obj(other, m)?) as i32),
+                }
+            }
+            B_FIND => {
+                let x = self.pop();
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                Value::I32(self.checked(obj::obj_find(&h, &x), m)?)
+            }
+            B_PUSH => {
+                let x = self.pop();
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                self.checked(obj::obj_push(&h, x), m)?;
+                Value::Void
+            }
+            B_POP => {
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                self.checked(obj::obj_pop(&h), m)?
+            }
+            B_INSERT => {
+                let x = self.pop();
+                let idx = self.pop();
+                let c = self.pop();
+                let i = self.index_of(&idx, m)?;
+                let h = self.as_obj(c, m)?;
+                self.checked(obj::obj_insert(&h, i, x), m)?;
+                Value::Void
+            }
+            B_ERASE => {
+                let idx = self.pop();
+                let c = self.pop();
+                let i = self.index_of(&idx, m)?;
+                let h = self.as_obj(c, m)?;
+                self.checked(obj::obj_erase(&h, i), m)?
+            }
+            B_ADD => {
+                let x = self.pop();
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                Value::Bool(self.checked(obj::obj_add(&h, x), m)?)
+            }
+            B_REMOVE => {
+                let x = self.pop();
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                Value::Bool(self.checked(obj::obj_remove(&h, &x), m)?)
+            }
+            B_CONTAINS => {
+                let x = self.pop();
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                Value::Bool(self.checked(obj::obj_contains(&h, &x), m)?)
+            }
+            B_CLEAR => {
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                obj::obj_clear(&h);
+                Value::Void
+            }
+            B_COPY => {
+                let c = self.pop();
+                obj::deep_copy(&c)
+            }
+            other => rt!(self, m, "unknown builtin #{}", other),
+        })
     }
 
     fn as_ptr(&self, v: Value, m: &Module) -> Result<usize, RuntimeError> {

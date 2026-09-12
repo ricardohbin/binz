@@ -3,6 +3,7 @@ mod bytecode;
 mod compiler;
 mod error;
 mod lexer;
+mod obj;
 mod parser;
 mod types;
 mod vm;

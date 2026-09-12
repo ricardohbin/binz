@@ -1,0 +1,117 @@
+// Containers: one fixed-size value type, four heap containers, and one
+// spelling for every operation that all of them share.
+
+function line(label: str, text: str): void {
+    print(label + ": " + text);
+    return;
+}
+
+// A fixed array is a value, so this receives a copy.
+function total(xs: [i32; 5]): i32 {
+    var i: i32 = 0;
+    var sum: i32 = 0;
+    while (i < len(xs)) {
+        sum = sum + xs[i];
+        i = i + 1;
+    }
+    return sum;
+}
+
+// A heap container is a handle, so this mutates the caller's vector.
+function fill(v: Vector<i32>, upto: i32): void {
+    var i: i32 = 0;
+    while (i < upto) {
+        push(v, i * i);
+        i = i + 1;
+    }
+    return;
+}
+
+function join(v: Vector<str>): str {
+    var out: str = "";
+    var i: i32 = 0;
+    while (i < len(v)) {
+        out = out + v[i];
+        if (i < len(v) - 1) {
+            out = out + ", ";
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+function main(): i32 {
+    print("-- binZ containers --");
+
+    // ------------------------------------------------- [T; N], a value type
+    // Every element is written out, exactly like a struct literal.
+    var scores: [i32; 5] = [7, 3, 9, 1, 5];
+    scores[0] = 10;
+    line("scores[0]", cast<str>(scores[0]));
+    line("total", cast<str>(total(scores)));
+    line("find 9", cast<str>(find(scores, 9)));
+
+    // `[x; N]` repeats one value; it is the only other array literal.
+    var grid: [[i32; 3]; 2] = [[0; 3]; 2];
+    grid[1][2] = 4;
+    line("grid[1][2]", cast<str>(grid[1][2]));
+
+    // Arrays copy, and an element has an address like any other place.
+    var copyOfScores: [i32; 5] = scores;
+    copyOfScores[0] = 0;
+    const first: *i32 = &scores[0];
+    line("original after copy", cast<str>(*first));
+
+    // ------------------------------------------------ Vector<T>, contiguous
+    var squares: Vector<i32> = Vector<i32>{};
+    fill(squares, 5);
+    erase(squares, 0);
+    push(squares, 100);
+    line("squares", cast<str>(len(squares)) + " items, last " + cast<str>(squares[len(squares) - 1]));
+    line("popped", cast<str>(pop(squares)));
+
+    // A handle aliases; `copy` is the one way to get independent storage.
+    var alias: Vector<i32> = squares;
+    var snapshot: Vector<i32> = copy(squares);
+    clear(squares);
+    line("alias / snapshot", cast<str>(len(alias)) + " / " + cast<str>(len(snapshot)));
+
+    // ------------------------------------------ LinkedList<T>, nodes, O(n) []
+    var queue: LinkedList<str> = LinkedList<str>{"bru", "cle"};
+    insert(queue, 0, "ana");
+    push(queue, "dan");
+    line("front", erase(queue, 0));
+    line("back", pop(queue));
+    line("left", cast<str>(len(queue)) + " (" + queue[0] + ", " + queue[1] + ")");
+
+    // --------------------------------------- Set<T>, insertion order, unique
+    var seen: Set<str> = Set<str>{"red", "green", "red"};
+    line("added blue", cast<str>(add(seen, "blue")));
+    line("added red again", cast<str>(add(seen, "red")));
+    line("has green", cast<str>(contains(seen, "green")));
+    line("dropped green", cast<str>(remove(seen, "green")));
+
+    var names: Vector<str> = Vector<str>{};
+    var i: i32 = 0;
+    while (i < len(seen)) {
+        push(names, seen[i]);
+        i = i + 1;
+    }
+    line("seen", join(names));
+
+    // ------------------------------------------ SortedSet<T>, ascending order
+    var ranked: SortedSet<i32> = SortedSet<i32>{40, 10, 30, 10};
+    add(ranked, 20);
+    var asText: Vector<str> = Vector<str>{};
+    i = 0;
+    while (i < len(ranked)) {
+        push(asText, cast<str>(ranked[i]));
+        i = i + 1;
+    }
+    line("ranked", join(asText));
+    line("has 30", cast<str>(contains(ranked, 30)));
+
+    // `len` also answers for a str.
+    line("len of a str", cast<str>(len("binZ")));
+    return 0;
+}

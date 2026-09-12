@@ -144,9 +144,46 @@ impl Parser {
         Ok(())
     }
 
+    /// A length is always a plain positive integer literal: binZ has no
+    /// constant folding, so there is exactly one thing that can appear here.
+    fn parse_length(&mut self) -> CResult<u32> {
+        let sp = self.span();
+        match self.peek().clone() {
+            Tok::Int(v) => {
+                self.bump();
+                if v <= 0 {
+                    return Err(CompileError::new("a length must be at least 1", sp));
+                }
+                if v > u32::MAX as i64 {
+                    return Err(CompileError::new("length is too large", sp));
+                }
+                Ok(v as u32)
+            }
+            other => Err(CompileError::new(
+                format!("expected an integer length, found `{}`", describe(&other)),
+                sp,
+            )),
+        }
+    }
+
     fn parse_type(&mut self) -> CResult<TypeExpr> {
         let sp = self.span();
         match self.peek().clone() {
+            Tok::LBracket => {
+                self.bump();
+                let elem = self.parse_type()?;
+                self.expect(Tok::Semi)?;
+                let n = self.parse_length()?;
+                self.expect(Tok::RBracket)?;
+                Ok(TypeExpr::Array(Box::new(elem), n, sp))
+            }
+            Tok::Container(k) => {
+                self.bump();
+                self.expect(Tok::Lt)?;
+                let elem = self.parse_type()?;
+                self.expect(Tok::Gt)?;
+                Ok(TypeExpr::Container(k, Box::new(elem), sp))
+            }
             Tok::Star => {
                 self.bump();
                 let inner = self.parse_type()?;
@@ -346,6 +383,10 @@ impl Parser {
                 }
                 self.expect(Tok::RParen)?;
                 e = Expr::Call { callee: Box::new(e), args, span };
+            } else if self.eat(&Tok::LBracket) {
+                let index = self.parse_expr()?;
+                self.expect(Tok::RBracket)?;
+                e = Expr::Index { base: Box::new(e), index: Box::new(index), span };
             } else if self.eat(&Tok::Dot) {
                 let (name, _) = self.ident()?;
                 e = Expr::Field { base: Box::new(e), name, span };
@@ -384,6 +425,46 @@ impl Parser {
                 let e = self.parse_expr()?;
                 self.expect(Tok::RParen)?;
                 Ok(e)
+            }
+            Tok::LBracket => {
+                self.bump();
+                if self.peek() == &Tok::RBracket {
+                    return Err(CompileError::new(
+                        "an array needs at least one element; use `Vector<T>{}` for an empty container",
+                        span,
+                    ));
+                }
+                let first = self.parse_expr()?;
+                if self.eat(&Tok::Semi) {
+                    let count = self.parse_length()?;
+                    self.expect(Tok::RBracket)?;
+                    return Ok(Expr::ArrayRepeat { value: Box::new(first), count, span });
+                }
+                let mut elems = vec![first];
+                while self.eat(&Tok::Comma) {
+                    if self.peek() == &Tok::RBracket {
+                        break;
+                    }
+                    elems.push(self.parse_expr()?);
+                }
+                self.expect(Tok::RBracket)?;
+                Ok(Expr::ArrayLit { elems, span })
+            }
+            Tok::Container(kind) => {
+                self.bump();
+                self.expect(Tok::Lt)?;
+                let elem = self.parse_type()?;
+                self.expect(Tok::Gt)?;
+                self.expect(Tok::LBrace)?;
+                let mut elems = Vec::new();
+                while self.peek() != &Tok::RBrace {
+                    elems.push(self.parse_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBrace)?;
+                Ok(Expr::ContainerLit { kind, elem, elems, span })
             }
             Tok::Cast => {
                 self.bump();
