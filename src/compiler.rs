@@ -260,6 +260,30 @@ impl Compiler {
                 }
                 Type::Container(*kind, Box::new(t))
             }
+            TypeExpr::Map(k, v, sp) => {
+                let kt = self.resolve_type(k)?;
+                let vt = self.resolve_type(v)?;
+                if !kt.is_key() {
+                    return Err(CompileError::new(
+                        format!(
+                            "a `HashMap` is keyed by value, so its key must be i32, i64, f64, bool or str, not `{}`",
+                            self.tn(&kt)
+                        ),
+                        *sp,
+                    ));
+                }
+                if !vt.is_slot() {
+                    return Err(CompileError::new(
+                        format!(
+                            "`HashMap` holds one-slot values and cannot hold `{}`; put it behind a pointer, or use `[{}; N]`",
+                            self.tn(&vt),
+                            self.tn(&vt)
+                        ),
+                        *sp,
+                    ));
+                }
+                Type::Map(Box::new(kt), Box::new(vt))
+            }
         })
     }
 
@@ -531,23 +555,38 @@ impl Compiler {
                     let bt = self.compile_expr(base, None)?;
                     let scratch = std::mem::replace(&mut self.code, saved);
                     self.next_slot = probe;
-                    if let Type::Container(kind, elem) = bt {
-                        if kind.is_set() {
-                            return Err(CompileError::new(
-                                format!(
-                                    "the elements of `{}` are its keys; use `add` and `remove` instead of assigning",
-                                    kind.name()
-                                ),
-                                *span,
-                            ));
+                    match bt {
+                        Type::Container(kind, elem) => {
+                            if kind.is_set() {
+                                return Err(CompileError::new(
+                                    format!(
+                                        "the elements of `{}` are its keys; use `add` and `remove` instead of assigning",
+                                        kind.name()
+                                    ),
+                                    *span,
+                                ));
+                            }
+                            self.code.extend_from_slice(&scratch);
+                            self.compile_index(index)?;
+                            let got = self.compile_expr(value, Some(&elem))?;
+                            self.expect_type(&elem, &got, value.span(), "in assignment")?;
+                            self.emit(OP_SET);
+                            self.next_slot = mark;
+                            return Ok(());
                         }
-                        self.code.extend_from_slice(&scratch);
-                        self.compile_index(index)?;
-                        let got = self.compile_expr(value, Some(&elem))?;
-                        self.expect_type(&elem, &got, value.span(), "in assignment")?;
-                        self.emit(OP_SET);
-                        self.next_slot = mark;
-                        return Ok(());
+                        // `m[key] = value` is the one way to put an entry in
+                        // a map: it inserts when the key is new and
+                        // overwrites when it is not.
+                        Type::Map(kt, vt) => {
+                            self.code.extend_from_slice(&scratch);
+                            self.compile_key(index, &kt)?;
+                            let got = self.compile_expr(value, Some(&vt))?;
+                            self.expect_type(&vt, &got, value.span(), "in assignment")?;
+                            self.emit(OP_SET);
+                            self.next_slot = mark;
+                            return Ok(());
+                        }
+                        _ => {}
                     }
                 }
                 let (tty, mutable) = self.compile_place(target)?;
@@ -707,6 +746,10 @@ impl Compiler {
                             "an element of `{}<...>` lives on the heap and has no address; copy it into a variable first",
                             kind.name()
                         ),
+                        *span,
+                    )),
+                    Type::Map(..) => Err(CompileError::new(
+                        "an entry of `HashMap<...>` lives on the heap and has no address; copy it into a variable first",
                         *span,
                     )),
                     other => Err(CompileError::new(
@@ -924,6 +967,11 @@ impl Compiler {
                         self.emit(OP_GET);
                         Ok(*elem)
                     }
+                    Type::Map(kt, vt) => {
+                        self.compile_key(index, &kt)?;
+                        self.emit(OP_GET);
+                        Ok(*vt)
+                    }
                     other => Err(CompileError::new(
                         format!("type `{}` cannot be indexed", self.tn(&other)),
                         *span,
@@ -939,6 +987,10 @@ impl Compiler {
 
             Expr::ContainerLit { kind, elem, elems, span } => {
                 self.compile_container_lit(*kind, elem, elems, *span)
+            }
+
+            Expr::MapLit { key, val, entries, span } => {
+                self.compile_map_lit(key, val, entries, *span)
             }
 
             Expr::StructLit { name, fields, span } => self.compile_struct_lit(name, fields, *span),
@@ -1082,6 +1134,14 @@ impl Compiler {
         }
         self.emit_op_u32(OP_ADDR_LOCAL, slot);
         Ok(Type::Struct(id))
+    }
+
+    /// A map is subscripted by its key type, the one place where the thing
+    /// inside `[...]` is not an `i32`.
+    fn compile_key(&mut self, key: &Expr, kt: &Type) -> CResult<()> {
+        let got = self.compile_expr(key, Some(kt))?;
+        self.expect_type(kt, &got, key.span(), "in a key")?;
+        Ok(())
     }
 
     /// Every index in binZ is an `i32`, so there is one thing to write here.
@@ -1234,6 +1294,72 @@ impl Compiler {
         Ok(ty)
     }
 
+    fn compile_map_lit(
+        &mut self,
+        key: &TypeExpr,
+        val: &TypeExpr,
+        entries: &[(Expr, Expr)],
+        span: Span,
+    ) -> CResult<Type> {
+        let ty = self.resolve_type(&TypeExpr::Map(
+            Box::new(key.clone()),
+            Box::new(val.clone()),
+            span,
+        ))?;
+        let (kt, vt) = match &ty {
+            Type::Map(k, v) => ((**k).clone(), (**v).clone()),
+            _ => unreachable!(),
+        };
+        for (k, v) in entries {
+            self.compile_key(k, &kt)?;
+            let got = self.compile_expr(v, Some(&vt))?;
+            self.expect_type(&vt, &got, v.span(), "in map literal")?;
+        }
+        self.emit(OP_NEW);
+        self.emit(KIND_MAP);
+        // Two stack values per entry: the key, then the value.
+        self.emit_u32((entries.len() * 2) as u32);
+        Ok(ty)
+    }
+
+    /// The builtins a `HashMap<K, V>` answers. Everything positional is a
+    /// compile error that names the spelling which does work.
+    fn compile_map_builtin(
+        &mut self,
+        name: &str,
+        id: u8,
+        args: &[Expr],
+        kt: Type,
+        ct: Type,
+        span: Span,
+    ) -> CResult<Type> {
+        let instead = match id {
+            B_FIND => Some("use `contains`"),
+            B_PUSH | B_ADD | B_INSERT => Some("write `m[key] = value`"),
+            B_ERASE => Some("use `remove`"),
+            B_POP => Some("a HashMap has no positions"),
+            _ => None,
+        };
+        if let Some(instead) = instead {
+            return Err(CompileError::new(
+                format!("`{}` is not defined for `{}`; {}", name, self.tn(&ct), instead),
+                span,
+            ));
+        }
+        if id == B_REMOVE || id == B_CONTAINS {
+            self.compile_key(&args[1], &kt)?;
+        }
+        self.emit(OP_BUILTIN);
+        self.emit(id);
+        Ok(match id {
+            B_LEN => Type::I32,
+            B_REMOVE | B_CONTAINS => Type::Bool,
+            B_KEYS => Type::Container(Kind::Vector, Box::new(kt)),
+            B_COPY => ct,
+            _ => Type::Void,
+        })
+    }
+
     /// Container builtins are special forms: they are generic over the
     /// element type, which binZ has no way to write in a signature.
     fn compile_builtin(
@@ -1251,6 +1377,19 @@ impl Compiler {
             ));
         }
         let ct = self.compile_expr(&args[0], None)?;
+
+        // `keys` is the one builtin defined for exactly one container.
+        if id == B_KEYS && !matches!(ct, Type::Map(..)) {
+            return Err(CompileError::new(
+                format!("`keys` is only defined for a `HashMap<K, V>`, found `{}`", self.tn(&ct)),
+                span,
+            ));
+        }
+
+        if let Type::Map(kt, _) = &ct {
+            let kt = (**kt).clone();
+            return self.compile_map_builtin(name, id, args, kt, ct.clone(), span);
+        }
 
         // `len` is the one builtin that also answers for a `str`.
         if let Type::Str = ct {

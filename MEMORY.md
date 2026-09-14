@@ -7,7 +7,8 @@ Curated long-term memory. Raw per-day logs live in `memory/YYYY-MM-DD.md`.
 A strongly typed, compiled language with C/C++/JS-shaped syntax. Rust frontend
 and backend, emitting a `.binzc` bytecode artifact executed by a stack VM in
 `src/vm.rs`. Source files are `.binz`. Started 2026-09-10 from an empty
-directory; v0.1 works end to end, containers landed 2026-09-11.
+directory; v0.1 works end to end, containers landed 2026-09-11, `HashMap`
+2026-09-14.
 
 **The one invariant: there is exactly ONE way to do one thing.** Every syntax
 question gets settled by that rule first, before taste. When proposing anything
@@ -33,6 +34,12 @@ does not go in.
   takes a position, `remove` takes a key**; `find` for sequences, `contains`
   for sets. `copy(c)` is the one deep copy. Full rationale in
   `memory/2026-09-11.md`.
+- `HashMap<K, V>`, 2026-09-14: the only two-argument type, so it is its own
+  `Type::Map` rather than a fifth `Kind`. **`m[key] = value` is the only way
+  in** (inserts or overwrites), reading an absent key traps because there is
+  no `null`, `keys(m)` returns a `Vector<K>` in insertion order and there is
+  deliberately no `values`. It answers `remove` / `contains` with the sets,
+  never `erase` / `find`. Rationale in `memory/2026-09-14.md`.
 
 ## Open, not yet decided by him
 
@@ -43,14 +50,17 @@ does not go in.
 - **Container builtins resolve last**, so a user `function add(...)` shadows
   the set builtin. `print` still cannot be redefined — inconsistent, and he
   may want one rule for both.
+- **`HashMap` next to `Set`** — `Set` is a hash set spelled bare, so the
+  naming is asymmetric. Either the map becomes `Map` or the set becomes
+  `HashSet`; one line in the lexer. I used his word. Flagged 2026-09-14.
 - **Contextual int literals** vs suffixes (`10i64`) — my call.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
 - `.binzc` artifact extension was my extrapolation from his `.binz` request.
 
 ## Not in v0.1
 
-Slices, closures, user-written generics, modules, methods, enums, maps,
-bitwise ops, unsigned ints, a standard library. `cast<str>` still formats
+Slices, closures, user-written generics, modules, methods, enums, an ordered
+map, bitwise ops, unsigned ints, a standard library. `cast<str>` still formats
 scalars only, so a container is printed by iterating it. Heap containers
 cannot hold structs and their elements have no address. Pointer lifetimes are
 C-like, not borrow-checked — dangling pointers trap at runtime but are not

@@ -54,6 +54,10 @@ pub enum Type {
     Array(Box<Type>, u32),
     /// `Vector<T>` and friends: a handle to heap storage.
     Container(Kind, Box<Type>),
+    /// `HashMap<K, V>`: a handle to heap storage keyed by value. It is the
+    /// one container with two type arguments, so it is its own variant
+    /// rather than a `Kind`.
+    Map(Box<Type>, Box<Type>),
 }
 
 impl Type {
@@ -77,7 +81,8 @@ impl Type {
         !self.is_aggregate() && *self != Type::Void
     }
 
-    /// Types a `Set` can key on: everything with a total, printable identity.
+    /// Types a `Set` or a `HashMap` can key on: everything with a total,
+    /// printable identity.
     pub fn is_key(&self) -> bool {
         matches!(self, Type::I32 | Type::I64 | Type::F64 | Type::Bool | Type::Str)
     }
@@ -116,5 +121,6 @@ pub fn type_name(t: &Type, structs: &[StructInfo]) -> String {
         Type::Struct(id) => structs[*id].name.clone(),
         Type::Array(elem, n) => format!("[{}; {}]", type_name(elem, structs), n),
         Type::Container(k, elem) => format!("{}<{}>", k.name(), type_name(elem, structs)),
+        Type::Map(k, v) => format!("HashMap<{}, {}>", type_name(k, structs), type_name(v, structs)),
     }
 }

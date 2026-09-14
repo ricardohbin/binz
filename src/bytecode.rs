@@ -55,6 +55,7 @@ pub const OP_RET: u8 = 0x51;
 pub const OP_CAST: u8 = 0x60;
 
 /// `[kind: u8, count: u32]` -- pops `count` values, pushes a new container.
+/// A `HashMap` pushes two values per entry, so `count` is twice its length.
 pub const OP_NEW: u8 = 0x70;
 /// Pops an index and a container, pushes the element.
 pub const OP_GET: u8 = 0x71;
@@ -67,6 +68,7 @@ pub const KIND_VECTOR: u8 = 0;
 pub const KIND_LIST: u8 = 1;
 pub const KIND_SET: u8 = 2;
 pub const KIND_SORTED_SET: u8 = 3;
+pub const KIND_MAP: u8 = 4;
 
 pub const B_LEN: u8 = 0;
 pub const B_FIND: u8 = 1;
@@ -79,6 +81,7 @@ pub const B_REMOVE: u8 = 7;
 pub const B_CONTAINS: u8 = 8;
 pub const B_CLEAR: u8 = 9;
 pub const B_COPY: u8 = 10;
+pub const B_KEYS: u8 = 11;
 
 /// Name and argument count of every container builtin. These are special
 /// forms: they are generic over the element type, so unlike `print` they are
@@ -95,6 +98,7 @@ pub const BUILTINS: &[(&str, u8, usize)] = &[
     ("contains", B_CONTAINS, 2),
     ("clear", B_CLEAR, 1),
     ("copy", B_COPY, 1),
+    ("keys", B_KEYS, 1),
 ];
 
 pub fn builtin_name(id: u8) -> &'static str {
@@ -357,7 +361,8 @@ pub fn disassemble(m: &Module) -> String {
                         KIND_VECTOR => "Vector",
                         KIND_LIST => "LinkedList",
                         KIND_SET => "Set",
-                        _ => "SortedSet",
+                        KIND_SORTED_SET => "SortedSet",
+                        _ => "HashMap",
                     };
                     format!("new {} {}", name, count)
                 }

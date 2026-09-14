@@ -19,7 +19,8 @@ pub enum Value {
     Ptr(usize),
     Fn(u32),
     Native(u32),
-    /// A handle to a `Vector` / `LinkedList` / `Set` / `SortedSet`.
+    /// A handle to a `Vector` / `LinkedList` / `Set` / `SortedSet` /
+    /// `HashMap`.
     Obj(Handle),
     Void,
 }
@@ -243,21 +244,31 @@ impl Vm {
                     let v = self.checked(obj::new_container(u8_operand, values), m)?;
                     self.stack.push(v);
                 }
+                // `c[i]` and `m[key]` share one opcode: what is on the stack
+                // is a position for a sequence and a key for a map.
                 OP_GET => {
                     let idx = self.pop();
                     let c = self.pop();
-                    let i = self.index_of(&idx, m)?;
                     let h = self.as_obj(c, m)?;
-                    let v = self.checked(obj::obj_get(&h, i), m)?;
+                    let v = if obj::is_map(&h) {
+                        self.checked(obj::map_get(&h, &idx), m)?
+                    } else {
+                        let i = self.index_of(&idx, m)?;
+                        self.checked(obj::obj_get(&h, i), m)?
+                    };
                     self.stack.push(v);
                 }
                 OP_SET => {
                     let v = self.pop();
                     let idx = self.pop();
                     let c = self.pop();
-                    let i = self.index_of(&idx, m)?;
                     let h = self.as_obj(c, m)?;
-                    self.checked(obj::obj_set(&h, i, v), m)?;
+                    if obj::is_map(&h) {
+                        self.checked(obj::map_set(&h, idx, v), m)?;
+                    } else {
+                        let i = self.index_of(&idx, m)?;
+                        self.checked(obj::obj_set(&h, i, v), m)?;
+                    }
                 }
                 OP_BUILTIN => {
                     let v = self.builtin(u8_operand, m)?;
@@ -473,6 +484,11 @@ impl Vm {
             B_COPY => {
                 let c = self.pop();
                 obj::deep_copy(&c)
+            }
+            B_KEYS => {
+                let c = self.pop();
+                let h = self.as_obj(c, m)?;
+                self.checked(obj::map_keys(&h), m)?
             }
             other => rt!(self, m, "unknown builtin #{}", other),
         })

@@ -111,6 +111,31 @@ function main(): i32 {
     line("ranked", join(asText));
     line("has 30", cast<str>(contains(ranked, 30)));
 
+    // -------------------------------- HashMap<K, V>, keyed by value, one way in
+    // `m[key] = value` inserts when the key is new and overwrites when it is
+    // not, so it is the only way to put an entry in.
+    var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31, "bruno": 27};
+    ages["carla"] = 45;
+    ages["ana"] = 32;
+    line("ana", cast<str>(ages["ana"]));
+    line("has bruno", cast<str>(contains(ages, "bruno")));
+    line("dropped bruno", cast<str>(remove(ages, "bruno")));
+
+    // `keys` hands back a Vector in insertion order: that is how a map is
+    // walked, since `m[k]` is already keyed by value.
+    const who: Vector<str> = keys(ages);
+    var pairs: Vector<str> = Vector<str>{};
+    i = 0;
+    while (i < len(who)) {
+        push(pairs, who[i] + "=" + cast<str>(ages[who[i]]));
+        i = i + 1;
+    }
+    line("ages", join(pairs));
+
+    // Reading a key that is not there traps -- binZ has no `null`, so
+    // `contains` is the guard.
+    line("has zed", cast<str>(contains(ages, "zed")));
+
     // `len` also answers for a str.
     line("len of a str", cast<str>(len("binZ")));
     return 0;
