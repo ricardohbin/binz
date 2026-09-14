@@ -166,6 +166,16 @@ impl Parser {
         }
     }
 
+    /// `<K, V>`, the one place in binZ where a type takes two arguments.
+    fn parse_map_args(&mut self) -> CResult<(TypeExpr, TypeExpr)> {
+        self.expect(Tok::Lt)?;
+        let k = self.parse_type()?;
+        self.expect(Tok::Comma)?;
+        let v = self.parse_type()?;
+        self.expect(Tok::Gt)?;
+        Ok((k, v))
+    }
+
     fn parse_type(&mut self) -> CResult<TypeExpr> {
         let sp = self.span();
         match self.peek().clone() {
@@ -183,6 +193,11 @@ impl Parser {
                 let elem = self.parse_type()?;
                 self.expect(Tok::Gt)?;
                 Ok(TypeExpr::Container(k, Box::new(elem), sp))
+            }
+            Tok::Map => {
+                self.bump();
+                let (k, v) = self.parse_map_args()?;
+                Ok(TypeExpr::Map(Box::new(k), Box::new(v), sp))
             }
             Tok::Star => {
                 self.bump();
@@ -465,6 +480,23 @@ impl Parser {
                 }
                 self.expect(Tok::RBrace)?;
                 Ok(Expr::ContainerLit { kind, elem, elems, span })
+            }
+            Tok::Map => {
+                self.bump();
+                let (key, val) = self.parse_map_args()?;
+                self.expect(Tok::LBrace)?;
+                let mut entries = Vec::new();
+                while self.peek() != &Tok::RBrace {
+                    let k = self.parse_expr()?;
+                    self.expect(Tok::Colon)?;
+                    let v = self.parse_expr()?;
+                    entries.push((k, v));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBrace)?;
+                Ok(Expr::MapLit { key, val, entries, span })
             }
             Tok::Cast => {
                 self.bump();

@@ -8,7 +8,7 @@ Rust backend, bytecode artifact plus a stack VM that executes it.
 Source files are `.binz`; compiled artifacts are `.binzc`.
 
 This is the v0.1 scratch: primitives, functions as first-class values, C-like
-structs and pointers, fixed arrays, and four heap containers.
+structs and pointers, fixed arrays, and five heap containers.
 
 ## Guiding rule: one way to do one thing
 
@@ -28,7 +28,8 @@ Every design decision below falls out of that rule.
 | Struct literals list every field, in declaration order | one shape per struct |
 | `const` / `var` — no third form | immutable by default in spirit |
 | No `null` | a `*T` always points at something |
-| `c[i]` indexes every container | one spelling for "the element at i" |
+| `c[i]` indexes every container | one spelling for "the element at i", by position for a sequence and by key for a `HashMap` |
+| `m[key] = value` is the only way into a `HashMap` | it inserts when the key is new and overwrites when it is not |
 | `len(c)` for every length | arrays, containers and `str` answer the same call |
 | Sequences use `find` / `erase`, sets use `contains` / `remove` | positions and keys are different questions, so they get different verbs |
 | `[T; N]` copies, `Vector<T>` aliases | one rule: frame storage is a value, heap storage is a handle |
@@ -56,7 +57,7 @@ Primitives: `i32`, `i64`, `f64`, `bool`, `str`, and `void` (return type only).
 
 Composites: `*T` (pointer), `function(A, B): R` (function), `struct`s,
 `[T; N]` (fixed array), and the heap containers `Vector<T>`, `LinkedList<T>`,
-`Set<T>` and `SortedSet<T>`.
+`Set<T>`, `SortedSet<T>` and `HashMap<K, V>`.
 
 ### Variables
 
@@ -138,7 +139,7 @@ var pn: *i64 = &a.y;     // pointers to fields work
 
 ### Containers
 
-Five of them, split by one question: does the storage live in the frame or on
+Six of them, split by one question: does the storage live in the frame or on
 the heap?
 
 | Type | Storage | Assignment | Element type |
@@ -148,6 +149,7 @@ the heap?
 | `LinkedList<T>` | heap, doubly linked nodes | aliases | any one-slot value |
 | `Set<T>` | heap, hashed, insertion order | aliases | `i32` `i64` `f64` `bool` `str` |
 | `SortedSet<T>` | heap, sorted, ascending order | aliases | `i32` `i64` `f64` `bool` `str` |
+| `HashMap<K, V>` | heap, hashed, insertion order | aliases | key: `i32` `i64` `f64` `bool` `str`; value: any one-slot value |
 
 A fixed array is a value like a struct: assigning, passing or returning one
 copies every element, and `&a[i]` is a real pointer into it. A heap container
@@ -167,6 +169,25 @@ v[0] = "ONE";
 
 var seen: Set<i32> = Set<i32>{3, 1, 3};   // two elements
 var ranked: SortedSet<i32> = SortedSet<i32>{40, 10};
+
+var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31};  // key: value
+ages["bruno"] = 27;                       // inserts
+ages["ana"] = 32;                         // overwrites
+```
+
+`HashMap<K, V>` is the one type with two arguments, and the one container
+subscripted by something other than an `i32`. Reading a key that is not there
+traps — binZ has no `null`, so `contains(m, k)` is the guard. Walking a map is
+`keys(m)`, which hands back a `Vector<K>` in insertion order; there is no
+`values`, because `m[k]` already answers that:
+
+```c
+const who: Vector<str> = keys(ages);
+var i: i32 = 0;
+while (i < len(who)) {
+    print(who[i] + " = " + cast<str>(ages[who[i]]));
+    i = i + 1;
+}
 ```
 
 A heap container may sit in a struct field or an array element, where it is
@@ -174,8 +195,9 @@ still just a handle: copying the struct shares the container. For the same
 reason `[Vector<i32>{}; 2]` repeats *one* handle into both slots — write the
 elements out to get two containers.
 
-`c[i]` reads an element of any of the five; it is assignable on the three
-sequences, and rejected on a set, whose elements are its keys. An index is
+`c[i]` reads an element of any of the six; it is assignable on the three
+sequences and on a `HashMap`, and rejected on a set, whose elements are its
+keys. An index is
 always an `i32`. Iteration is a `while` over `len`, and it is deterministic
 everywhere — a `Set` keeps insertion order, a `SortedSet` stays ascending:
 
@@ -199,10 +221,11 @@ one shape:
 | `insert(c, i, x)` | `Vector`, `LinkedList` | `void` |
 | `erase(c, i)` | `Vector`, `LinkedList` | the removed element |
 | `add(s, x)` | `Set`, `SortedSet` | `true` if it was new |
-| `remove(s, x)` | `Set`, `SortedSet` | `true` if it was there |
-| `contains(s, x)` | `Set`, `SortedSet` | `bool` |
-| `clear(c)` | the four heap containers | `void` |
-| `copy(c)` | the four heap containers | a deep copy |
+| `remove(s, x)` | `Set`, `SortedSet`, `HashMap` | `true` if it was there |
+| `contains(s, x)` | `Set`, `SortedSet`, `HashMap` | `bool` |
+| `keys(m)` | `HashMap` | a `Vector<K>`, in insertion order |
+| `clear(c)` | the five heap containers | `void` |
+| `copy(c)` | the five heap containers | a deep copy |
 
 `erase` takes a position and `remove` takes a key, so there is never a choice
 about which one a container wants. Applying the wrong one says so:
@@ -211,14 +234,15 @@ about which one a container wants. Applying the wrong one says so:
 error: `push` is not defined for `Set<i32>`; use `add`
 error: `contains` is not defined for `Vector<i32>`; use `find`
 error: `push` is not defined for `[i32; 1]`; a fixed array never changes size, use `Vector<i32>`
+error: `add` is not defined for `HashMap<str, i32>`; write `m[key] = value`
 ```
 
 These builtins are generic over the element type, which binZ has no way to
 write in a signature, so unlike `print` they are not first-class values. They
 resolve last, so a program that declares its own `add` or `find` shadows them.
 
-Out-of-range indexes, `pop` on an empty container and NaN used as a set key
-all trap at runtime.
+Out-of-range indexes, a `HashMap` key that is not present, `pop` on an empty
+container and NaN used as a key all trap at runtime.
 
 ### Operators
 
@@ -255,7 +279,7 @@ src/parser.rs     tokens -> AST
 src/compiler.rs   AST -> type check + bytecode, in a single pass
 src/bytecode.rs   instruction set, .binzc serialization, disassembler
 src/vm.rs         stack VM
-src/obj.rs        heap containers behind Vector / LinkedList / Set / SortedSet
+src/obj.rs        heap containers behind Vector / LinkedList / Set / SortedSet / HashMap
 ```
 
 The compiler is one pass: because binZ has no inference beyond literal typing,
@@ -269,17 +293,21 @@ explicit `copy` of N slots, which is what gives structs value semantics. A
 fixed array is the same kind of value, so `[T; N]` costs `N * sizeof(T)` slots
 in the frame and indexing it is one bounds-checked address computation.
 
-The four heap containers are the only things outside that model: each is one
+The five heap containers are the only things outside that model: each is one
 slot holding a reference-counted handle, and storage is freed when the last
 handle goes. `LinkedList<T>` really is a doubly linked list, held in a node
 arena, and `l[i]` walks from whichever end is closer — indexing a list is
 O(n), and that is the honest cost. `Set<T>` is a hash index over an
 insertion-ordered vector; `SortedSet<T>` is a sorted vector searched by
-bisection.
+bisection; `HashMap<K, V>` is the same shape as `Set<T>`, a hash index over an
+insertion-ordered vector of pairs, which is what makes `keys(m)` deterministic
+across runs. `get` and `set` share the `c[i]` opcodes: the VM reads the value
+on the stack as a position for a sequence and as a key for a map.
 
 Runtime traps: division/remainder by zero, integer overflow, an index out of
-range, `pop` on an empty container, NaN used as a set key, and dereferencing a
-pointer into a frame that has already been popped.
+range, a `HashMap` key that is not present, `pop` on an empty container, NaN
+used as a key, and dereferencing a pointer into a frame that has already been
+popped.
 
 ### Artifact format
 
@@ -289,8 +317,8 @@ parameter slot sizes, frame size, sret flag, code), entry index.
 ## Not in v0.1
 
 Slices, user-written generics, closures, modules/imports, methods,
-enums/unions, maps, a real standard library, bitwise operators, and unsigned
-integers. `cast<str>` formats scalars only, so a container is printed by
+enums/unions, an ordered map, a real standard library, bitwise operators, and
+unsigned integers. `cast<str>` formats scalars only, so a container is printed by
 iterating it. Heap containers cannot hold structs, and their elements have no
 address. Dangling pointers are detectable but not prevented — pointer
 lifetimes are C-like, not borrow-checked.

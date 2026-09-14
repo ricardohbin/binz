@@ -1,5 +1,5 @@
-//! Heap storage behind `Vector<T>`, `LinkedList<T>`, `Set<T>` and
-//! `SortedSet<T>`.
+//! Heap storage behind `Vector<T>`, `LinkedList<T>`, `Set<T>`,
+//! `SortedSet<T>` and `HashMap<K, V>`.
 //!
 //! Every one of them is reached through a reference-counted handle, so a
 //! container value is a single slot and copying it aliases the same storage.
@@ -20,6 +20,7 @@ pub enum Obj {
     List(List),
     Set(SetData),
     SortedSet(Vec<Value>),
+    Map(MapData),
 }
 
 pub type OResult<T> = Result<T, String>;
@@ -47,8 +48,8 @@ pub fn value_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Hashable identity of a set element. The compiler already restricts set
-/// elements to scalars, so the error arms here are defence in depth.
+/// Hashable identity of a set element or a map key. The compiler already
+/// restricts both to scalars, so the error arms here are defence in depth.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
     I32(i32),
@@ -64,15 +65,27 @@ pub fn key_of(v: &Value) -> OResult<Key> {
         Value::I64(x) => Key::I64(*x),
         Value::F64(x) => {
             if x.is_nan() {
-                return Err("a set cannot hold NaN: it is not equal to itself".into());
+                return Err("NaN cannot be a key: it is not equal to itself".into());
             }
             // -0.0 and 0.0 are the same element.
             Key::F64(if *x == 0.0 { 0.0f64.to_bits() } else { x.to_bits() })
         }
         Value::Bool(x) => Key::Bool(*x),
         Value::Str(x) => Key::Str((**x).clone()),
-        _ => return Err("this value cannot be a set element".into()),
+        _ => return Err("this value cannot be a key".into()),
     })
+}
+
+/// A key as it would be written in source, for the "no such key" message.
+fn show_key(v: &Value) -> String {
+    match v {
+        Value::I32(x) => x.to_string(),
+        Value::I64(x) => x.to_string(),
+        Value::F64(x) => crate::vm::format_f64(*x),
+        Value::Bool(x) => x.to_string(),
+        Value::Str(s) => format!("{:?}", s),
+        _ => "that value".into(),
+    }
 }
 
 pub fn cmp_values(a: &Value, b: &Value) -> OResult<Ordering> {
@@ -85,7 +98,7 @@ pub fn cmp_values(a: &Value, b: &Value) -> OResult<Ordering> {
         },
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
-        _ => return Err("this value cannot be a set element".into()),
+        _ => return Err("these values cannot be compared".into()),
     };
     Ok(o)
 }
@@ -106,6 +119,14 @@ pub fn deep_copy(v: &Value) -> Value {
                 Obj::Set(out)
             }
             Obj::SortedSet(items) => Obj::SortedSet(items.iter().map(deep_copy).collect()),
+            Obj::Map(mp) => {
+                let mut out = MapData::default();
+                for (k, v) in &mp.entries {
+                    // Keys are scalars, so this cannot fail for a live map.
+                    let _ = out.set(k.clone(), deep_copy(v));
+                }
+                Obj::Map(out)
+            }
         }),
         other => other.clone(),
     }
@@ -390,12 +411,86 @@ pub fn sorted_remove(items: &mut Vec<Value>, v: &Value) -> OResult<bool> {
     }
 }
 
+// ---------------------------------------------------------------- hash map
+
+/// A hash map that keeps insertion order, so `keys(m)` is deterministic
+/// across runs. Same shape as `SetData`, with a value beside every key.
+#[derive(Debug, Default)]
+pub struct MapData {
+    entries: Vec<(Value, Value)>,
+    index: HashMap<Key, usize>,
+}
+
+impl MapData {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn contains(&self, k: &Value) -> OResult<bool> {
+        Ok(self.index.contains_key(&key_of(k)?))
+    }
+
+    /// binZ has no `null`, so reading an absent key is a trap rather than a
+    /// value the program has to test for.
+    pub fn get(&self, k: &Value) -> OResult<Value> {
+        match self.index.get(&key_of(k)?) {
+            Some(at) => Ok(self.entries[*at].1.clone()),
+            None => Err(format!(
+                "key {} is not in the HashMap; test with `contains` first",
+                show_key(k)
+            )),
+        }
+    }
+
+    /// Inserts or overwrites. A key keeps the position of its first insert.
+    pub fn set(&mut self, k: Value, v: Value) -> OResult<()> {
+        let key = key_of(&k)?;
+        match self.index.get(&key) {
+            Some(at) => self.entries[*at].1 = v,
+            None => {
+                self.index.insert(key, self.entries.len());
+                self.entries.push((k, v));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn remove(&mut self, k: &Value) -> OResult<bool> {
+        let key = key_of(k)?;
+        let pos = match self.index.remove(&key) {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+        self.entries.remove(pos);
+        for slot in self.index.values_mut() {
+            if *slot > pos {
+                *slot -= 1;
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn keys(&self) -> Vec<Value> {
+        self.entries.iter().map(|e| e.0.clone()).collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.index.clear();
+    }
+}
+
 // ------------------------------------------------------------- entry points
 //
 // The compiler has already checked which builtin may be applied to which
 // container, so the mismatched arms below are defence in depth.
 
-use crate::bytecode::{KIND_LIST, KIND_SET, KIND_SORTED_SET, KIND_VECTOR};
+use crate::bytecode::{KIND_LIST, KIND_MAP, KIND_SET, KIND_SORTED_SET, KIND_VECTOR};
+
+/// The `Vector<T>` that `keys(m)` hands back.
+pub fn new_vector(values: Vec<Value>) -> Value {
+    handle(Obj::Vector(values))
+}
 
 pub fn new_container(kind: u8, values: Vec<Value>) -> OResult<Value> {
     Ok(handle(match kind {
@@ -415,6 +510,18 @@ pub fn new_container(kind: u8, values: Vec<Value>) -> OResult<Value> {
             }
             Obj::SortedSet(items)
         }
+        KIND_MAP => {
+            // A map literal pushes a key and a value per entry, in order.
+            let mut mp = MapData::default();
+            let mut it = values.into_iter();
+            while let Some(k) = it.next() {
+                match it.next() {
+                    Some(v) => mp.set(k, v)?,
+                    None => return Err("a HashMap literal ended without a value".into()),
+                }
+            }
+            Obj::Map(mp)
+        }
         other => return Err(format!("unknown container kind {}", other)),
     }))
 }
@@ -425,6 +532,7 @@ pub fn kind_name(o: &Obj) -> &'static str {
         Obj::List(_) => "LinkedList",
         Obj::Set(_) => "Set",
         Obj::SortedSet(_) => "SortedSet",
+        Obj::Map(_) => "HashMap",
     }
 }
 
@@ -437,6 +545,33 @@ pub fn obj_len(h: &Handle) -> usize {
         Obj::Vector(items) | Obj::SortedSet(items) => items.len(),
         Obj::List(l) => l.len(),
         Obj::Set(s) => s.len(),
+        Obj::Map(mp) => mp.len(),
+    }
+}
+
+/// A map is reached by key, so `m[k]` takes a different path than `c[i]`.
+pub fn is_map(h: &Handle) -> bool {
+    matches!(&*h.borrow(), Obj::Map(_))
+}
+
+pub fn map_get(h: &Handle, k: &Value) -> OResult<Value> {
+    match &*h.borrow() {
+        Obj::Map(mp) => mp.get(k),
+        other => Err(format!("a {} is indexed by position, not by key", kind_name(other))),
+    }
+}
+
+pub fn map_set(h: &Handle, k: Value, v: Value) -> OResult<()> {
+    match &mut *h.borrow_mut() {
+        Obj::Map(mp) => mp.set(k, v),
+        other => Err(format!("a {} is indexed by position, not by key", kind_name(other))),
+    }
+}
+
+pub fn map_keys(h: &Handle) -> OResult<Value> {
+    match &*h.borrow() {
+        Obj::Map(mp) => Ok(new_vector(mp.keys())),
+        other => Err(format!("`keys` is not defined for a {}", kind_name(other))),
     }
 }
 
@@ -449,6 +584,7 @@ pub fn obj_get(h: &Handle, i: usize) -> OResult<Value> {
         },
         Obj::List(l) => l.get(i),
         Obj::Set(s) => s.get(i),
+        Obj::Map(_) => Err("a HashMap is indexed by key, not by position".into()),
     }
 }
 
@@ -464,6 +600,7 @@ pub fn obj_set(h: &Handle, i: usize, v: Value) -> OResult<()> {
             Ok(())
         }
         Obj::List(l) => l.set(i, v),
+        Obj::Map(_) => Err("a HashMap is indexed by key, not by position".into()),
         _ => Err("elements of a set are its keys and cannot be replaced".into()),
     }
 }
@@ -540,6 +677,7 @@ pub fn obj_add(h: &Handle, v: Value) -> OResult<bool> {
     match &mut *h.borrow_mut() {
         Obj::Set(s) => s.add(v),
         Obj::SortedSet(items) => sorted_add(items, v),
+        Obj::Map(_) => Err("`add` is not defined for a HashMap; write `m[key] = value`".into()),
         other => Err(format!("`add` is not defined for a {}; use `push`", kind_name(other))),
     }
 }
@@ -548,6 +686,7 @@ pub fn obj_remove(h: &Handle, v: &Value) -> OResult<bool> {
     match &mut *h.borrow_mut() {
         Obj::Set(s) => s.remove(v),
         Obj::SortedSet(items) => sorted_remove(items, v),
+        Obj::Map(mp) => mp.remove(v),
         other => Err(format!("`remove` is not defined for a {}; use `erase`", kind_name(other))),
     }
 }
@@ -556,6 +695,7 @@ pub fn obj_contains(h: &Handle, v: &Value) -> OResult<bool> {
     match &*h.borrow() {
         Obj::Set(s) => s.contains(v),
         Obj::SortedSet(items) => Ok(sorted_search(items, v)?.is_ok()),
+        Obj::Map(mp) => mp.contains(v),
         other => Err(format!("`contains` is not defined for a {}; use `find`", kind_name(other))),
     }
 }
@@ -565,5 +705,6 @@ pub fn obj_clear(h: &Handle) {
         Obj::Vector(items) | Obj::SortedSet(items) => items.clear(),
         Obj::List(l) => l.clear(),
         Obj::Set(s) => s.clear(),
+        Obj::Map(mp) => mp.clear(),
     }
 }

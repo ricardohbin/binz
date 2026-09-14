@@ -502,3 +502,101 @@ fn traps_on_nan_as_a_set_key() {
     );
     assert!(e.contains("NaN"), "{}", e);
 }
+
+#[test]
+fn hashmap_reads_writes_and_iterates() {
+    let out = run_ok(
+        "map",
+        &in_main(
+            r#"
+            var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31, "bruno": 27};
+            ages["carla"] = 45;
+            ages["ana"] = 32;
+            print(cast<str>(len(ages)) + " " + cast<str>(ages["ana"]));
+            print(cast<str>(contains(ages, "bruno")) + " " + cast<str>(contains(ages, "zed")));
+            print(cast<str>(remove(ages, "bruno")) + " " + cast<str>(remove(ages, "bruno")));
+            const ks: Vector<str> = keys(ages);
+            var i: i32 = 0;
+            var line: str = "";
+            while (i < len(ks)) {
+                line = line + ks[i] + "=" + cast<str>(ages[ks[i]]) + " ";
+                i = i + 1;
+            }
+            print(line);
+            clear(ages);
+            print(cast<str>(len(ages)));
+        "#,
+        ),
+    );
+    assert_eq!(out, "3 32\ntrue false\ntrue false\nana=32 carla=45 \n0\n");
+}
+
+#[test]
+fn hashmap_aliases_and_copies_deeply() {
+    let out = run_ok(
+        "mapalias",
+        &in_main(
+            r#"
+            var a: HashMap<str, Vector<i32>> = HashMap<str, Vector<i32>>{};
+            a["xs"] = Vector<i32>{1, 2};
+            const shared: HashMap<str, Vector<i32>> = a;
+            push(shared["xs"], 3);
+            const mine: HashMap<str, Vector<i32>> = copy(a);
+            push(mine["xs"], 4);
+            print(cast<str>(len(a["xs"])) + " " + cast<str>(len(mine["xs"])));
+        "#,
+        ),
+    );
+    assert_eq!(out, "3 4\n");
+}
+
+#[test]
+fn hashmap_keeps_each_key_once() {
+    let out = run_ok(
+        "mapdup",
+        &in_main(
+            r#"
+            const m: HashMap<i32, str> = HashMap<i32, str>{1: "one", 1: "uno"};
+            print(cast<str>(len(m)) + " " + m[1]);
+        "#,
+        ),
+    );
+    assert_eq!(out, "1 uno\n");
+}
+
+#[test]
+fn rejects_the_wrong_builtin_for_a_hashmap() {
+    let e = run_err("mapop", &in_main("var m: HashMap<str, i32> = HashMap<str, i32>{}; push(m, 1);"));
+    assert!(e.contains("write `m[key] = value`"), "{}", e);
+    let e = run_err("mapop2", &in_main("var m: HashMap<str, i32> = HashMap<str, i32>{}; erase(m, 0);"));
+    assert!(e.contains("use `remove`"), "{}", e);
+    let e = run_err("mapop3", &in_main("var v: Vector<i32> = Vector<i32>{}; const k: Vector<i32> = keys(v);"));
+    assert!(e.contains("only defined for a `HashMap<K, V>`"), "{}", e);
+}
+
+#[test]
+fn rejects_a_bad_hashmap_key_or_value() {
+    let e = run_err(
+        "mapkey",
+        "struct P { x: i32 }
+         function main(): i32 { var m: HashMap<P, i32> = HashMap<P, i32>{}; return 0; }",
+    );
+    assert!(e.contains("keyed by value"), "{}", e);
+    let e = run_err(
+        "mapval",
+        "struct P { x: i32 }
+         function main(): i32 { var m: HashMap<i32, P> = HashMap<i32, P>{}; return 0; }",
+    );
+    assert!(e.contains("one-slot values"), "{}", e);
+    let e = run_err("mapidx", &in_main("var m: HashMap<str, i32> = HashMap<str, i32>{}; m[1] = 2;"));
+    assert!(e.contains("in a key: expected `str`"), "{}", e);
+}
+
+#[test]
+fn traps_on_a_missing_hashmap_key() {
+    let e = run_err(
+        "mapmiss",
+        &in_main("const m: HashMap<str, i32> = HashMap<str, i32>{\"a\": 1}; print(cast<str>(m[\"b\"]));"),
+    );
+    assert!(e.contains("is not in the HashMap"), "{}", e);
+}

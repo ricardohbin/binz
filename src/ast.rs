@@ -10,6 +10,8 @@ pub enum TypeExpr {
     Array(Box<TypeExpr>, u32, Span),
     /// `Vector<T>`, `LinkedList<T>`, `Set<T>`, `SortedSet<T>`
     Container(Kind, Box<TypeExpr>, Span),
+    /// `HashMap<K, V>`
+    Map(Box<TypeExpr>, Box<TypeExpr>, Span),
 }
 
 impl TypeExpr {
@@ -19,7 +21,8 @@ impl TypeExpr {
             | TypeExpr::Ptr(_, s)
             | TypeExpr::Fn(_, _, s)
             | TypeExpr::Array(_, _, s)
-            | TypeExpr::Container(_, _, s) => *s,
+            | TypeExpr::Container(_, _, s)
+            | TypeExpr::Map(_, _, s) => *s,
         }
     }
 }
@@ -196,6 +199,13 @@ pub enum Expr {
         elems: Vec<Expr>,
         span: Span,
     },
+    /// `HashMap<str, i32>{ "a": 1, "b": 2 }`
+    MapLit {
+        key: TypeExpr,
+        val: TypeExpr,
+        entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -215,7 +225,8 @@ impl Expr {
             | Expr::Index { span: s, .. }
             | Expr::ArrayLit { span: s, .. }
             | Expr::ArrayRepeat { span: s, .. }
-            | Expr::ContainerLit { span: s, .. } => *s,
+            | Expr::ContainerLit { span: s, .. }
+            | Expr::MapLit { span: s, .. } => *s,
         }
     }
 
