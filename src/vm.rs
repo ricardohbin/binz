@@ -7,7 +7,6 @@ use std::rc::Rc;
 
 use crate::bytecode::*;
 use crate::obj::{self, Handle};
-use crate::types::Type;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -23,15 +22,6 @@ pub enum Value {
     /// `HashMap`.
     Obj(Handle),
     Void,
-}
-
-pub type NativeSig = fn() -> Type;
-
-/// Builtins visible in every scope. They are ordinary first-class values.
-pub const NATIVES: &[(&str, NativeSig)] = &[("print", || Type::Fn(vec![Type::Str], Box::new(Type::Void)))];
-
-pub fn native_name(idx: u32) -> &'static str {
-    NATIVES[idx as usize].0
 }
 
 #[derive(Debug)]
@@ -416,11 +406,36 @@ impl Vm {
 
     fn builtin(&mut self, id: u8, m: &Module) -> Result<Value, RuntimeError> {
         Ok(match id {
-            B_LEN => {
+            B_SIZE => {
                 let c = self.pop();
-                match c {
-                    Value::Str(s) => Value::I32(s.chars().count() as i32),
-                    other => Value::I32(obj::obj_len(&self.as_obj(other, m)?) as i32),
+                Value::I32(obj::obj_len(&self.as_obj(c, m)?) as i32)
+            }
+            B_INT_ABS => {
+                let a = self.pop();
+                match a {
+                    Value::I32(x) => match x.checked_abs() {
+                        Some(v) => Value::I32(v),
+                        None => rt!(self, m, "`int.abs` overflowed an i32"),
+                    },
+                    Value::I64(x) => match x.checked_abs() {
+                        Some(v) => Value::I64(v),
+                        None => rt!(self, m, "`int.abs` overflowed an i64"),
+                    },
+                    _ => rt!(self, m, "`int.abs` expects an integer"),
+                }
+            }
+            B_INT_MIN | B_INT_MAX => {
+                let b = self.pop();
+                let a = self.pop();
+                let lo = id == B_INT_MIN;
+                match (a, b) {
+                    (Value::I32(x), Value::I32(y)) => {
+                        Value::I32(if lo { x.min(y) } else { x.max(y) })
+                    }
+                    (Value::I64(x), Value::I64(y)) => {
+                        Value::I64(if lo { x.min(y) } else { x.max(y) })
+                    }
+                    _ => rt!(self, m, "`int.min` and `int.max` expect two integers of the same width"),
                 }
             }
             B_FIND => {
@@ -618,16 +633,183 @@ impl Vm {
         })
     }
 
-    fn call_native(&self, idx: u32, args: &[Value], m: &Module) -> Result<Value, RuntimeError> {
-        match idx {
-            0 => {
-                match &args[0] {
-                    Value::Str(s) => println!("{}", s),
-                    _ => rt!(self, m, "`print` expects a str"),
-                }
-                Ok(Value::Void)
-            }
-            _ => rt!(self, m, "unknown builtin #{}", idx),
+    fn str_arg(&self, v: &Value, m: &Module) -> Result<Rc<String>, RuntimeError> {
+        match v {
+            Value::Str(s) => Ok(s.clone()),
+            _ => rt!(self, m, "expected a str"),
         }
+    }
+
+    fn f64_arg(&self, v: &Value, m: &Module) -> Result<f64, RuntimeError> {
+        match v {
+            Value::F64(x) => Ok(*x),
+            _ => rt!(self, m, "expected an f64"),
+        }
+    }
+
+    fn i32_arg(&self, v: &Value, m: &Module) -> Result<i32, RuntimeError> {
+        match v {
+            Value::I32(x) => Ok(*x),
+            _ => rt!(self, m, "expected an i32"),
+        }
+    }
+
+    /// Character offset of the `n`th character, for the `string` module.
+    /// Every position binZ hands out is a character index, so that
+    /// `string.size` and `string.slice` agree on non-ASCII text.
+    fn char_byte(s: &str, n: usize) -> usize {
+        s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len())
+    }
+
+    /// `string.find` answers a character index, so a byte offset from
+    /// Rust's search has to be converted back.
+    fn char_index_of(s: &str, byte: usize) -> i32 {
+        s[..byte].chars().count() as i32
+    }
+
+    fn call_native(&self, idx: u32, args: &[Value], m: &Module) -> Result<Value, RuntimeError> {
+        // The index is the position in `stdlib::NATIVES`.
+        Ok(match idx {
+            // ------------------------------------------------------ io
+            0 => {
+                println!("{}", self.str_arg(&args[0], m)?);
+                Value::Void
+            }
+
+            // -------------------------------------------------- string
+            1 => Value::I32(self.str_arg(&args[0], m)?.chars().count() as i32),
+            2 => {
+                let s = self.str_arg(&args[0], m)?;
+                let i = self.i32_arg(&args[1], m)?;
+                match if i < 0 { None } else { s.chars().nth(i as usize) } {
+                    Some(c) => Value::Str(Rc::new(c.to_string())),
+                    None => rt!(
+                        self,
+                        m,
+                        "`string.at` index {} is out of range for a str of size {}",
+                        i,
+                        s.chars().count()
+                    ),
+                }
+            }
+            3 => {
+                let s = self.str_arg(&args[0], m)?;
+                let (a, b) = (self.i32_arg(&args[1], m)?, self.i32_arg(&args[2], m)?);
+                let n = s.chars().count() as i32;
+                if a < 0 || b > n || a > b {
+                    rt!(self, m, "`string.slice` range {}..{} is not inside 0..{}", a, b, n);
+                }
+                let (lo, hi) = (Self::char_byte(&s, a as usize), Self::char_byte(&s, b as usize));
+                Value::Str(Rc::new(s[lo..hi].to_string()))
+            }
+            4 => {
+                let (s, sub) = (self.str_arg(&args[0], m)?, self.str_arg(&args[1], m)?);
+                // Same convention as `container.find`: a position, or -1.
+                Value::I32(match s.find(sub.as_str()) {
+                    Some(b) => Self::char_index_of(&s, b),
+                    None => -1,
+                })
+            }
+            5 => {
+                let (s, sub) = (self.str_arg(&args[0], m)?, self.str_arg(&args[1], m)?);
+                Value::Bool(s.contains(sub.as_str()))
+            }
+            6 => {
+                let (s, p) = (self.str_arg(&args[0], m)?, self.str_arg(&args[1], m)?);
+                Value::Bool(s.starts_with(p.as_str()))
+            }
+            7 => {
+                let (s, p) = (self.str_arg(&args[0], m)?, self.str_arg(&args[1], m)?);
+                Value::Bool(s.ends_with(p.as_str()))
+            }
+            8 => Value::Str(Rc::new(self.str_arg(&args[0], m)?.to_uppercase())),
+            9 => Value::Str(Rc::new(self.str_arg(&args[0], m)?.to_lowercase())),
+            10 => Value::Str(Rc::new(self.str_arg(&args[0], m)?.trim().to_string())),
+            11 => {
+                let s = self.str_arg(&args[0], m)?;
+                let n = self.i32_arg(&args[1], m)?;
+                if n < 0 {
+                    rt!(self, m, "`string.repeat` count {} is negative", n);
+                }
+                Value::Str(Rc::new(s.repeat(n as usize)))
+            }
+            12 => {
+                let s = self.str_arg(&args[0], m)?;
+                let from = self.str_arg(&args[1], m)?;
+                let to = self.str_arg(&args[2], m)?;
+                if from.is_empty() {
+                    rt!(self, m, "`string.replace` cannot match an empty str");
+                }
+                Value::Str(Rc::new(s.replace(from.as_str(), to.as_str())))
+            }
+            13 => {
+                let s = self.str_arg(&args[0], m)?;
+                let sep = self.str_arg(&args[1], m)?;
+                if sep.is_empty() {
+                    rt!(self, m, "`string.split` cannot split on an empty str");
+                }
+                let parts: Vec<Value> = s
+                    .split(sep.as_str())
+                    .map(|p| Value::Str(Rc::new(p.to_string())))
+                    .collect();
+                obj::new_vector(parts)
+            }
+            14 => {
+                let h = self.as_obj(args[0].clone(), m)?;
+                let sep = self.str_arg(&args[1], m)?;
+                let n = obj::obj_len(&h);
+                let mut out = String::new();
+                for i in 0..n {
+                    if i > 0 {
+                        out.push_str(&sep);
+                    }
+                    let v = self.checked(obj::obj_get(&h, i), m)?;
+                    out.push_str(&self.str_arg(&v, m)?);
+                }
+                Value::Str(Rc::new(out))
+            }
+
+            // ----------------------------------------------------- int
+            // `parse` answers the widest integer; `cast<i32>` narrows.
+            15 => {
+                let s = self.str_arg(&args[0], m)?;
+                match s.trim().parse::<i64>() {
+                    Ok(v) => Value::I64(v),
+                    Err(_) => rt!(
+                        self,
+                        m,
+                        "`int.parse` cannot read \"{}\" as an integer; guard it with `int.canParse`",
+                        s
+                    ),
+                }
+            }
+            16 => Value::Bool(self.str_arg(&args[0], m)?.trim().parse::<i64>().is_ok()),
+
+            // --------------------------------------------------- float
+            17 => {
+                let s = self.str_arg(&args[0], m)?;
+                match s.trim().parse::<f64>() {
+                    Ok(v) => Value::F64(v),
+                    Err(_) => rt!(
+                        self,
+                        m,
+                        "`float.parse` cannot read \"{}\" as an f64; guard it with `float.canParse`",
+                        s
+                    ),
+                }
+            }
+            18 => Value::Bool(self.str_arg(&args[0], m)?.trim().parse::<f64>().is_ok()),
+            19 => Value::F64(self.f64_arg(&args[0], m)?.abs()),
+            20 => Value::F64(self.f64_arg(&args[0], m)?.min(self.f64_arg(&args[1], m)?)),
+            21 => Value::F64(self.f64_arg(&args[0], m)?.max(self.f64_arg(&args[1], m)?)),
+            22 => Value::F64(self.f64_arg(&args[0], m)?.floor()),
+            23 => Value::F64(self.f64_arg(&args[0], m)?.ceil()),
+            24 => Value::F64(self.f64_arg(&args[0], m)?.round()),
+            25 => Value::F64(self.f64_arg(&args[0], m)?.sqrt()),
+            26 => Value::F64(self.f64_arg(&args[0], m)?.powf(self.f64_arg(&args[1], m)?)),
+            27 => Value::Bool(self.f64_arg(&args[0], m)?.is_nan()),
+
+            _ => rt!(self, m, "unknown stdlib function #{}", idx),
+        })
     }
 }

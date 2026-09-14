@@ -50,8 +50,28 @@ pub struct FnDef {
     pub span: Span,
 }
 
+/// `import binz/io;`. The path is stored segment by segment; the last one
+/// is the name the module is bound to, always, with no way to rename it.
+#[derive(Debug, Clone)]
+pub struct ImportDef {
+    pub path: Vec<String>,
+    pub span: Span,
+}
+
+impl ImportDef {
+    /// The binding, i.e. the `io` in `io.print`.
+    pub fn binding(&self) -> &str {
+        self.path.last().map(|s| s.as_str()).unwrap_or("")
+    }
+
+    pub fn text(&self) -> String {
+        self.path.join("/")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Item {
+    Import(ImportDef),
     Struct(StructDef),
     Fn(FnDef),
 }

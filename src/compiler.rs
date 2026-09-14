@@ -9,7 +9,7 @@ use crate::bytecode::*;
 use crate::error::{CResult, CompileError};
 use crate::lexer::Span;
 use crate::types::*;
-use crate::vm::NATIVES;
+use crate::stdlib;
 
 /// Upper bound on the slots one value may occupy. Fixed arrays are frame
 /// storage, so this is what keeps a type annotation from asking for a
@@ -33,6 +33,8 @@ struct FnSig {
 }
 
 pub struct Compiler {
+    /// Modules made visible by an `import`, by their binding name.
+    imports: Vec<String>,
     structs: Vec<StructInfo>,
     struct_ids: HashMap<String, usize>,
     sigs: Vec<FnSig>,
@@ -51,6 +53,7 @@ pub struct Compiler {
 
 pub fn compile(items: &[Item]) -> CResult<Module> {
     let mut c = Compiler {
+        imports: Vec::new(),
         structs: Vec::new(),
         struct_ids: HashMap::new(),
         sigs: Vec::new(),
@@ -69,9 +72,45 @@ pub fn compile(items: &[Item]) -> CResult<Module> {
 
 impl Compiler {
     fn run(&mut self, items: &[Item]) -> CResult<Module> {
+        // 0. imports. A module is bound to the last segment of its path and
+        // to nothing else, so `binz/io` is always reached as `io.`.
+        for item in items {
+            if let Item::Import(im) = item {
+                if im.path.len() != 2 || im.path[0] != "binz" {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is not a module path; every module is spelled `binz/<name>` ({})",
+                            im.text(),
+                            stdlib::MODULES.join(", ")
+                        ),
+                        im.span,
+                    ));
+                }
+                let name = im.binding().to_string();
+                if !stdlib::is_module(&name) {
+                    return Err(CompileError::new(
+                        format!(
+                            "there is no module `binz/{}`; binZ has {}",
+                            name,
+                            stdlib::MODULES.join(", ")
+                        ),
+                        im.span,
+                    ));
+                }
+                if self.imports.contains(&name) {
+                    return Err(CompileError::new(
+                        format!("`binz/{}` is already imported", name),
+                        im.span,
+                    ));
+                }
+                self.imports.push(name);
+            }
+        }
+
         // 1. struct names
         for item in items {
             if let Item::Struct(sd) = item {
+                self.check_free(&sd.name, sd.span, "the name of a struct")?;
                 if self.struct_ids.contains_key(&sd.name) {
                     return Err(CompileError::new(
                         format!("struct `{}` is already defined", sd.name),
@@ -121,12 +160,7 @@ impl Compiler {
         // 4. function signatures
         for item in items {
             if let Item::Fn(fd) = item {
-                if NATIVES.iter().any(|n| n.0 == fd.name) {
-                    return Err(CompileError::new(
-                        format!("`{}` is a builtin and cannot be redefined", fd.name),
-                        fd.span,
-                    ));
-                }
+                self.check_free(&fd.name, fd.span, "the name of a function")?;
                 if self.fn_ids.contains_key(&fd.name) {
                     return Err(CompileError::new(
                         format!("function `{}` is already defined", fd.name),
@@ -419,7 +453,24 @@ impl Compiler {
         slot
     }
 
+    /// An imported module owns its binding for the whole program: nothing
+    /// else may be called `io` once `binz/io` is in scope. That is what lets
+    /// `io.print` be read without checking whether `io` is a local struct.
+    fn check_free(&self, name: &str, span: Span, what: &str) -> CResult<()> {
+        if self.imports.iter().any(|m| m == name) {
+            return Err(CompileError::new(
+                format!(
+                    "`{}` is the imported module `binz/{}`, so it cannot also be {}",
+                    name, name, what
+                ),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
     fn declare(&mut self, name: &str, ty: Type, slot: u32, mutable: bool, span: Span) -> CResult<()> {
+        self.check_free(name, span, "a variable")?;
         if self.scopes.last().unwrap().iter().any(|l| l.name == name) {
             return Err(CompileError::new(
                 format!("`{}` is already declared in this scope", name),
@@ -699,6 +750,12 @@ impl Compiler {
                 )),
             },
             Expr::Field { base, name, span } => {
+                if let Some(m) = self.module_base(base)? {
+                    return Err(CompileError::new(
+                        format!("`{}.{}` is a stdlib function, not a place", m, name),
+                        *span,
+                    ));
+                }
                 let (bt, mutable) = self.compile_place(base)?;
                 let id = match bt {
                     Type::Struct(id) => id,
@@ -844,18 +901,8 @@ impl Compiler {
                     self.emit_op_u32(OP_PUSH_FN, *idx as u32);
                     return Ok(Type::Fn(sig.params, Box::new(sig.ret)));
                 }
-                if let Some(idx) = NATIVES.iter().position(|n| n.0 == name) {
-                    self.emit_op_u32(OP_PUSH_NATIVE, idx as u32);
-                    return Ok(NATIVES[idx].1());
-                }
-                if BUILTINS.iter().any(|b| b.0 == name) {
-                    return Err(CompileError::new(
-                        format!(
-                            "`{}` is generic over the element type, so it is not a value; call it directly, or declare your own `{}` to shadow it",
-                            name, name
-                        ),
-                        *span,
-                    ));
+                if let Some(e) = stdlib_hint(name, *span) {
+                    return Err(e);
                 }
                 Err(CompileError::new(format!("`{}` is not defined", name), *span))
             }
@@ -938,7 +985,10 @@ impl Compiler {
                 Ok(target)
             }
 
-            Expr::Field { .. } => {
+            Expr::Field { base, name, span } => {
+                if let Some(m) = self.module_base(base)? {
+                    return self.compile_module_value(&m, name, *span);
+                }
                 let (t, _) = self.compile_place(e)?;
                 if !t.is_aggregate() {
                     self.emit(OP_LOAD_PTR);
@@ -1334,9 +1384,9 @@ impl Compiler {
         span: Span,
     ) -> CResult<Type> {
         let instead = match id {
-            B_FIND => Some("use `contains`"),
+            B_FIND => Some("use `container.contains`"),
             B_PUSH | B_ADD | B_INSERT => Some("write `m[key] = value`"),
-            B_ERASE => Some("use `remove`"),
+            B_ERASE => Some("use `container.remove`"),
             B_POP => Some("a HashMap has no positions"),
             _ => None,
         };
@@ -1352,7 +1402,7 @@ impl Compiler {
         self.emit(OP_BUILTIN);
         self.emit(id);
         Ok(match id {
-            B_LEN => Type::I32,
+            B_SIZE => Type::I32,
             B_REMOVE | B_CONTAINS => Type::Bool,
             B_KEYS => Type::Container(Kind::Vector, Box::new(kt)),
             B_COPY => ct,
@@ -1360,28 +1410,71 @@ impl Compiler {
         })
     }
 
-    /// Container builtins are special forms: they are generic over the
-    /// element type, which binZ has no way to write in a signature.
-    fn compile_builtin(
+    /// `int.abs` / `int.min` / `int.max`: generic over `i32` and `i64`, and
+    /// answering in the width they were handed, so neither one is forced
+    /// through a `cast` to use them.
+    fn compile_int_form(&mut self, name: &str, id: u8, args: &[Expr], span: Span) -> CResult<Type> {
+        let t = self.compile_expr(&args[0], Some(&Type::I32))?;
+        if !t.is_integer() {
+            let hint = if t == Type::F64 { format!("; an `f64` answers `float.{}`", name) } else { String::new() };
+            return Err(CompileError::new(
+                format!("`int.{}` needs an `i32` or an `i64`, found `{}`{}", name, self.tn(&t), hint),
+                span,
+            ));
+        }
+        if id != B_INT_ABS {
+            let got = self.compile_expr(&args[1], Some(&t))?;
+            self.expect_type(&t, &got, args[1].span(), "in argument")?;
+        }
+        self.emit(OP_BUILTIN);
+        self.emit(id);
+        Ok(t)
+    }
+
+    /// The generic half of the standard library: special forms that the
+    /// compiler resolves against the type of their first argument, because
+    /// binZ has no way yet to write that signature down.
+    fn compile_form(
         &mut self,
-        name: &str,
+        module: &str,
+        member: &str,
         id: u8,
         arity: usize,
         args: &[Expr],
         span: Span,
     ) -> CResult<Type> {
+        let name = format!("{}.{}", module, member);
+        let name = name.as_str();
         if args.len() != arity {
             return Err(CompileError::new(
                 format!("`{}` takes {} argument(s), found {}", name, arity, args.len()),
                 span,
             ));
         }
+        if module == "int" {
+            return self.compile_int_form(member, id, args, span);
+        }
         let ct = self.compile_expr(&args[0], None)?;
 
-        // `keys` is the one builtin defined for exactly one container.
+        // `keys` is the one form defined for exactly one container.
         if id == B_KEYS && !matches!(ct, Type::Map(..)) {
             return Err(CompileError::new(
-                format!("`keys` is only defined for a `HashMap<K, V>`, found `{}`", self.tn(&ct)),
+                format!("`{}` is only defined for a `HashMap<K, V>`, found `{}`", name, self.tn(&ct)),
+                span,
+            ));
+        }
+
+        // A `str` is not a container: it answers `binz/string` instead, so
+        // `size`, `find` and `contains` each have exactly one spelling per
+        // type rather than one spelling covering both.
+        if let Type::Str = ct {
+            let hint = if stdlib::find_native("string", member).is_some() {
+                format!("; a `str` answers `string.{}`", member)
+            } else {
+                "; a `str` is not a container".to_string()
+            };
+            return Err(CompileError::new(
+                format!("`{}` needs a container, found `str`{}", name, hint),
                 span,
             ));
         }
@@ -1391,20 +1484,11 @@ impl Compiler {
             return self.compile_map_builtin(name, id, args, kt, ct.clone(), span);
         }
 
-        // `len` is the one builtin that also answers for a `str`.
-        if let Type::Str = ct {
-            if id == B_LEN {
-                self.emit(OP_BUILTIN);
-                self.emit(B_LEN);
-                return Ok(Type::I32);
-            }
-        }
-
         let (elem, kind) = match &ct {
             Type::Array(elem, n) => {
                 match id {
-                    B_LEN => {
-                        // The length is part of the type; drop the base address.
+                    B_SIZE => {
+                        // The size is part of the type; drop the base address.
                         self.emit(OP_POP);
                         self.emit(OP_PUSH_I32);
                         self.emit_u32(*n);
@@ -1453,9 +1537,9 @@ impl Compiler {
         let wants_set = matches!(id, B_ADD | B_REMOVE | B_CONTAINS);
         if wants_sequence && kind.is_set() {
             let instead = match id {
-                B_FIND => "use `contains`",
-                B_PUSH => "use `add`",
-                B_ERASE => "use `remove`",
+                B_FIND => "use `container.contains`",
+                B_PUSH => "use `container.add`",
+                B_ERASE => "use `container.remove`",
                 _ => "a set has no positions",
             };
             return Err(CompileError::new(
@@ -1465,9 +1549,9 @@ impl Compiler {
         }
         if wants_set && kind.is_sequence() {
             let instead = match id {
-                B_ADD => "use `push`",
-                B_REMOVE => "use `erase`",
-                _ => "use `find`",
+                B_ADD => "use `container.push`",
+                B_REMOVE => "use `container.erase`",
+                _ => "use `container.find`",
             };
             return Err(CompileError::new(
                 format!("`{}` is not defined for `{}`; {}", name, self.tn(&ct), instead),
@@ -1494,7 +1578,7 @@ impl Compiler {
         self.emit(id);
 
         Ok(match id {
-            B_LEN | B_FIND => Type::I32,
+            B_SIZE | B_FIND => Type::I32,
             B_POP | B_ERASE => elem,
             B_ADD | B_REMOVE | B_CONTAINS => Type::Bool,
             B_COPY => ct,
@@ -1502,17 +1586,94 @@ impl Compiler {
         })
     }
 
+    /// `io`, when `base` is the bare name of an imported module. Returns an
+    /// error instead when it names a module the program forgot to import.
+    fn module_base(&self, base: &Expr) -> CResult<Option<String>> {
+        let (name, span) = match base {
+            Expr::Ident(n, sp) => (n, *sp),
+            _ => return Ok(None),
+        };
+        if self.lookup(name).is_some() {
+            return Ok(None);
+        }
+        if self.imports.iter().any(|m| m == name) {
+            return Ok(Some(name.clone()));
+        }
+        if stdlib::is_module(name) {
+            return Err(CompileError::new(
+                format!(
+                    "`{}` is not imported; add `import binz/{};` at the top of the file",
+                    name, name
+                ),
+                span,
+            ));
+        }
+        Ok(None)
+    }
+
+    fn no_member(&self, module: &str, name: &str, span: Span) -> CompileError {
+        let elsewhere: Vec<&str> = stdlib::modules_defining(name)
+            .into_iter()
+            .filter(|m| *m != module)
+            .collect();
+        let hint = if elsewhere.is_empty() {
+            String::new()
+        } else {
+            format!("; it is in {}", stdlib::describe_modules(&elsewhere))
+        };
+        CompileError::new(
+            format!("`binz/{}` has no `{}`{}", module, name, hint),
+            span,
+        )
+    }
+
+    /// A stdlib member used as a value. It is one exactly when its type can
+    /// be written down in binZ; the generic ones have to be called.
+    fn compile_module_value(&mut self, module: &str, name: &str, span: Span) -> CResult<Type> {
+        if let Some((idx, ty)) = stdlib::find_native(module, name) {
+            self.emit_op_u32(OP_PUSH_NATIVE, idx);
+            return Ok(ty);
+        }
+        if stdlib::find_form(module, name).is_some() {
+            return Err(CompileError::new(
+                format!(
+                    "`{}.{}` is generic over the type it is given, which binZ cannot write in a signature, so it is not a value; call it directly",
+                    module, name
+                ),
+                span,
+            ));
+        }
+        Err(self.no_member(module, name, span))
+    }
+
+    fn compile_module_call(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> CResult<Type> {
+        if let Some(form) = stdlib::find_form(module, name) {
+            return self.compile_form(module, name, form.id, form.arity, args, span);
+        }
+        if let Some((idx, ty)) = stdlib::find_native(module, name) {
+            self.emit_op_u32(OP_PUSH_NATIVE, idx);
+            return self.finish_call(ty, args, span);
+        }
+        Err(self.no_member(module, name, span))
+    }
+
     fn compile_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> CResult<Type> {
-        // Container builtins are resolved last: anything the program declares
-        // with the same name wins, exactly like an ordinary shadow.
-        if let Expr::Ident(name, _) = callee {
-            if self.lookup(name).is_none() && !self.fn_ids.contains_key(name) {
-                if let Some((n, id, arity)) = BUILTINS.iter().find(|b| b.0 == name) {
-                    return self.compile_builtin(n, *id, *arity, args, span);
-                }
+        if let Expr::Field { base, name, .. } = callee {
+            if let Some(m) = self.module_base(base)? {
+                return self.compile_module_call(&m, name, args, span);
             }
         }
         let ct = self.compile_expr(callee, None)?;
+        self.finish_call(ct, args, span)
+    }
+
+    fn finish_call(&mut self, ct: Type, args: &[Expr], span: Span) -> CResult<Type> {
         let (params, ret) = match ct {
             Type::Fn(p, r) => (p, *r),
             other => {
@@ -1566,4 +1727,26 @@ fn stmt_returns(s: &Stmt) -> bool {
         Stmt::If { then, els: Some(e), .. } => block_returns(then) && block_returns(e),
         _ => false,
     }
+}
+
+/// Turns a bare `print(...)` or `len(...)` -- how binZ was written before the
+/// standard library had modules -- into the import and the spelling that
+/// replace it.
+fn stdlib_hint(name: &str, span: Span) -> Option<CompileError> {
+    let renamed = stdlib::renamed_to(name);
+    let target = renamed.unwrap_or(name);
+    let mods = stdlib::modules_defining(target);
+    if mods.is_empty() {
+        return None;
+    }
+    let calls: Vec<String> = mods.iter().map(|m| format!("`{}.{}`", m, target)).collect();
+    let was = match renamed {
+        Some(new) => format!("`{}` is now `{}`, in {}", name, new, stdlib::describe_modules(&mods)),
+        None => format!("`{}` is in {}", name, stdlib::describe_modules(&mods)),
+    };
+    let imports: Vec<String> = mods.iter().map(|m| format!("import binz/{};", m)).collect();
+    Some(CompileError::new(
+        format!("{}; write {} after `{}`", was, calls.join(" or "), imports.join(" ")),
+        span,
+    ))
 }

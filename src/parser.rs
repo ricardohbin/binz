@@ -66,10 +66,21 @@ impl Parser {
 
     pub fn parse_program(&mut self) -> CResult<Vec<Item>> {
         let mut items = Vec::new();
+        // Imports come first, all of them, so the head of a file always says
+        // exactly what it depends on.
+        while self.peek() == &Tok::Import {
+            items.push(Item::Import(self.parse_import()?));
+        }
         while self.peek() != &Tok::Eof {
             match self.peek() {
                 Tok::Struct => items.push(Item::Struct(self.parse_struct()?)),
                 Tok::Function => items.push(Item::Fn(self.parse_fn()?)),
+                Tok::Import => {
+                    return Err(CompileError::new(
+                        "every `import` goes at the top of the file, before the first `struct` or `function`",
+                        self.span(),
+                    ))
+                }
                 Tok::Fn => {
                     return Err(CompileError::new(
                         "binZ declares functions with `function`, not `fn`",
@@ -88,6 +99,25 @@ impl Parser {
             }
         }
         Ok(items)
+    }
+
+    /// `import binz/io;` -- one module per statement, bound to the last
+    /// segment of its path and to nothing else.
+    fn parse_import(&mut self) -> CResult<ImportDef> {
+        let span = self.span();
+        self.expect(Tok::Import)?;
+        let mut path = vec![self.ident()?.0];
+        while self.eat(&Tok::Slash) {
+            path.push(self.ident()?.0);
+        }
+        if self.peek() == &Tok::Comma {
+            return Err(CompileError::new(
+                "one module per `import`; write a second `import` line instead",
+                self.span(),
+            ));
+        }
+        self.expect(Tok::Semi)?;
+        Ok(ImportDef { path, span })
     }
 
     fn parse_struct(&mut self) -> CResult<StructDef> {

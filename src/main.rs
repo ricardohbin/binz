@@ -5,6 +5,7 @@ mod error;
 mod lexer;
 mod obj;
 mod parser;
+mod stdlib;
 mod types;
 mod vm;
 
