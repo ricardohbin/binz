@@ -4,7 +4,7 @@
 //!   magic "BINZ" | version u32 | strings | functions | entry u32
 
 pub const MAGIC: &[u8; 4] = b"BINZ";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub const OP_PUSH_I32: u8 = 0x01;
 pub const OP_PUSH_I64: u8 = 0x02;
@@ -70,7 +70,7 @@ pub const KIND_SET: u8 = 2;
 pub const KIND_SORTED_SET: u8 = 3;
 pub const KIND_MAP: u8 = 4;
 
-pub const B_LEN: u8 = 0;
+pub const B_SIZE: u8 = 0;
 pub const B_FIND: u8 = 1;
 pub const B_PUSH: u8 = 2;
 pub const B_POP: u8 = 3;
@@ -82,27 +82,12 @@ pub const B_CONTAINS: u8 = 8;
 pub const B_CLEAR: u8 = 9;
 pub const B_COPY: u8 = 10;
 pub const B_KEYS: u8 = 11;
-
-/// Name and argument count of every container builtin. These are special
-/// forms: they are generic over the element type, so unlike `print` they are
-/// not first-class values.
-pub const BUILTINS: &[(&str, u8, usize)] = &[
-    ("len", B_LEN, 1),
-    ("find", B_FIND, 2),
-    ("push", B_PUSH, 2),
-    ("pop", B_POP, 1),
-    ("insert", B_INSERT, 3),
-    ("erase", B_ERASE, 2),
-    ("add", B_ADD, 2),
-    ("remove", B_REMOVE, 2),
-    ("contains", B_CONTAINS, 2),
-    ("clear", B_CLEAR, 1),
-    ("copy", B_COPY, 1),
-    ("keys", B_KEYS, 1),
-];
+pub const B_INT_ABS: u8 = 12;
+pub const B_INT_MIN: u8 = 13;
+pub const B_INT_MAX: u8 = 14;
 
 pub fn builtin_name(id: u8) -> &'static str {
-    BUILTINS.iter().find(|b| b.1 == id).map(|b| b.0).unwrap_or("?")
+    crate::stdlib::form_name(id)
 }
 
 pub const CAST_I32: u8 = 0;
@@ -303,7 +288,7 @@ pub fn disassemble(m: &Module) -> String {
                 OP_PUSH_NATIVE => {
                     let v = rd_u32(code, pc);
                     pc += 4;
-                    format!("push.native {} ; {}", v, crate::vm::native_name(v))
+                    format!("push.native {} ; {}", v, crate::stdlib::native_name(v))
                 }
                 OP_PUSH_VOID => "push.void".to_string(),
                 OP_LOAD_LOCAL | OP_STORE_LOCAL | OP_ADDR_LOCAL | OP_FIELD | OP_COPY

@@ -1,0 +1,96 @@
+// The standard library. Every module is imported by its full path and every
+// member is reached through the last segment of that path -- `io.print`,
+// `string.size`, `container.push`. There is no second spelling: no bare
+// import, no alias, no wildcard.
+
+import binz/io;
+import binz/string;
+import binz/int;
+import binz/float;
+import binz/container;
+
+function line(label: str, text: str): void {
+    io.print(label + ": " + text);
+    return;
+}
+
+function main(): i32 {
+    io.print("-- binz/string --");
+
+    const name: str = "  binZ Language  ";
+    const clean: str = string.trim(name);
+    line("trim", "[" + clean + "]");
+    line("size", cast<str>(string.size(clean)));
+    line("upper / lower", string.upper(clean) + " / " + string.lower(clean));
+    line("at 0", string.at(clean, 0));
+    line("slice 0..4", string.slice(clean, 0, 4));
+    line("find Lang", cast<str>(string.find(clean, "Lang")));
+    line("find nope", cast<str>(string.find(clean, "nope")));
+    line("contains Z", cast<str>(string.contains(clean, "Z")));
+    line("starts / ends", cast<str>(string.startsWith(clean, "bin")) + " / "
+        + cast<str>(string.endsWith(clean, "age")));
+    line("replace", string.replace(clean, " ", "-"));
+    line("repeat", string.repeat("ab", 3));
+
+    // `split` hands back a Vector<str>, so the container module takes over
+    // from here -- one type, one set of verbs.
+    const parts: Vector<str> = string.split("a,b,c,d", ",");
+    line("split size", cast<str>(container.size(parts)));
+    line("join", string.join(parts, " | "));
+
+    io.print("");
+    io.print("-- binz/int --");
+
+    // `parse` answers the widest integer and traps on anything else, so
+    // `canParse` is the guard -- the same shape as `container.contains`.
+    line("canParse 42", cast<str>(int.canParse("42")));
+    line("canParse forty", cast<str>(int.canParse("forty")));
+    line("parse 42", cast<str>(int.parse("42")));
+    line("narrowed", cast<str>(cast<i32>(int.parse("42"))));
+
+    // `abs` / `min` / `max` answer in the width they were handed.
+    const small: i32 = -9;
+    const wide: i64 = -900000000000;
+    line("abs i32", cast<str>(int.abs(small)));
+    line("abs i64", cast<str>(int.abs(wide)));
+    line("min / max", cast<str>(int.min(3, 8)) + " / " + cast<str>(int.max(3, 8)));
+
+    io.print("");
+    io.print("-- binz/float --");
+
+    const x: f64 = 2.75;
+    line("floor / ceil", cast<str>(float.floor(x)) + " / " + cast<str>(float.ceil(x)));
+    line("round", cast<str>(float.round(x)));
+    line("abs", cast<str>(float.abs(-x)));
+    line("sqrt", cast<str>(float.sqrt(9.0)));
+    line("pow", cast<str>(float.pow(2.0, 10.0)));
+    line("min / max", cast<str>(float.min(x, 1.5)) + " / " + cast<str>(float.max(x, 1.5)));
+    line("parse", cast<str>(float.parse("3.5")));
+    line("isNan", cast<str>(float.isNan(x)));
+
+    io.print("");
+    io.print("-- binz/container --");
+
+    var words: Vector<str> = Vector<str>{};
+    var i: i32 = 0;
+    while (i < container.size(parts)) {
+        container.push(words, string.upper(parts[i]));
+        i = i + 1;
+    }
+    line("words", string.join(words, ""));
+    line("find C", cast<str>(container.find(words, "C")));
+
+    var tally: HashMap<str, i32> = HashMap<str, i32>{};
+    tally["a"] = 1;
+    tally["b"] = 2;
+    line("has a", cast<str>(container.contains(tally, "a")));
+    line("keys", string.join(container.keys(tally), ","));
+
+    // A monomorphic stdlib function has a type binZ can write, so it is an
+    // ordinary value. A generic one -- `container.size` over five containers
+    // -- has no such type and must be called directly.
+    const say: function(str): void = io.print;
+    say("first-class, because `function(str): void` is writable");
+
+    return 0;
+}

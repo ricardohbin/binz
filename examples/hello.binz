@@ -1,4 +1,6 @@
+import binz/io;
+
 function main(): i32 {
-    print("hello from binZ");
+    io.print("hello from binZ");
     return 0;
 }

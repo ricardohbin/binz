@@ -1,3 +1,7 @@
+// A tour of binZ.
+
+import binz/io;
+
 // ---------------------------------------------------------------- structs
 
 struct Point {
@@ -42,7 +46,7 @@ function midpoint(l: Line): Point {
 }
 
 function show(name: str, p: Point): void {
-    print(name + " = (" + cast<str>(p.x) + ", " + cast<str>(p.y) + ")");
+    io.print(name + " = (" + cast<str>(p.x) + ", " + cast<str>(p.y) + ")");
     return;
 }
 
@@ -56,7 +60,7 @@ function fib(n: i64): i64 {
 function main(): i32 {
     // const is immutable, var is mutable; the type is always written out
     const greeting: str = "-- binZ tour --";
-    print(greeting);
+    io.print(greeting);
 
     var i: i64 = 0;
     var total: i64 = 0;
@@ -64,20 +68,21 @@ function main(): i32 {
         total = total + i;
         i = i + 1;
     }
-    print("sum 0..9 = " + cast<str>(total));
+    io.print("sum 0..9 = " + cast<str>(total));
 
     // no implicit conversions anywhere: cast<T>() is the only way
     const ratio: f64 = cast<f64>(total) / 4.0;
-    print("ratio = " + cast<str>(ratio));
-    print("truncated = " + cast<str>(cast<i32>(ratio)));
+    io.print("ratio = " + cast<str>(ratio));
+    io.print("truncated = " + cast<str>(cast<i32>(ratio)));
 
     // functions as first-class values
     const op: function(i64, i64): i64 = mul;
-    print("apply(mul, 6, 7) = " + cast<str>(apply(op, 6, 7)));
-    print("apply(add, 6, 7) = " + cast<str>(apply(add, 6, 7)));
+    io.print("apply(mul, 6, 7) = " + cast<str>(apply(op, 6, 7)));
+    io.print("apply(add, 6, 7) = " + cast<str>(apply(add, 6, 7)));
 
-    // print itself is just a value of type function(str): void
-    const say: function(str): void = print;
+    // io.print is a value like any other: its type, function(str): void,
+    // is writable in binZ, and that is exactly what makes it one
+    const say: function(str): void = io.print;
     say("called through a function variable");
 
     // structs, pointers and value copies
@@ -95,12 +100,12 @@ function main(): i32 {
     };
     show(line.label, midpoint(line));
 
-    print("fib(20) = " + cast<str>(fib(20)));
+    io.print("fib(20) = " + cast<str>(fib(20)));
 
     if (total > 40 && ratio < 100.0) {
-        print("conditions hold");
+        io.print("conditions hold");
     } else {
-        print("unreachable");
+        io.print("unreachable");
     }
 
     return 0;
