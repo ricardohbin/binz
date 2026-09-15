@@ -1,0 +1,17 @@
+// A module is an ordinary binZ file. It imports what it uses -- the file that
+// imports it is not a scope -- and it does not define `main`, because `main`
+// is the program, not a library.
+
+import binz/float;
+
+function square(n: i32): i32 {
+    return n * n;
+}
+
+function circleArea(radius: f64): f64 {
+    return 3.14159265358979 * radius * radius;
+}
+
+function hypotenuse(a: f64, b: f64): f64 {
+    return float.sqrt(a * a + b * b);
+}

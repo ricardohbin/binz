@@ -52,6 +52,39 @@ fn run_raw_err(name: &str, src: &str) -> String {
     String::from_utf8(out.stderr).unwrap()
 }
 
+/// A project on disk, since `@root` is the directory of the entry file and a
+/// module has to be a real file next to it. `main.binz` is always the entry.
+/// The directory name has to be unique for the same reason `write_temp`'s
+/// file name does -- tests run in parallel.
+fn write_project(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("binz_proj_{}", name));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, src) in files {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(&path).unwrap().write_all(src.as_bytes()).unwrap();
+    }
+    dir.join("main.binz")
+}
+
+fn run_project(name: &str, files: &[(&str, &str)]) -> std::process::Output {
+    let path = write_project(name, files);
+    Command::new(env!("CARGO_BIN_EXE_binz")).arg("run").arg(&path).output().unwrap()
+}
+
+fn run_project_ok(name: &str, files: &[(&str, &str)]) -> String {
+    let out = run_project(name, files);
+    assert!(out.status.success(), "program failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn run_project_err(name: &str, files: &[(&str, &str)]) -> String {
+    let out = run_project(name, files);
+    assert!(!out.status.success(), "expected failure, program succeeded");
+    String::from_utf8(out.stderr).unwrap()
+}
+
 fn in_main(body: &str) -> String {
     format!("function main(): i32 {{\n{}\nreturn 0;\n}}", body)
 }
@@ -961,4 +994,538 @@ fn float_module_covers_the_usual_arithmetic() {
         ),
     );
     assert_eq!(out, "3.0 256.0 2.0 3.0 false\n");
+}
+
+// ----------------------------------------------------------- local modules
+
+#[test]
+fn a_local_module_exports_every_function_it_defines() {
+    let out = run_project_ok(
+        "exports",
+        &[
+            (
+                "utils/math.binz",
+                "import binz/int;\n\
+                 function square(n: i32): i32 { return n * n; }\n\
+                 function clamp(n: i32, lo: i32, hi: i32): i32 {\n\
+                     return int.min(int.max(n, lo), hi);\n\
+                 }\n",
+            ),
+            (
+                "main.binz",
+                "import binz/io;\n\
+                 import @root/utils/math.binz;\n\
+                 function main(): i32 {\n\
+                     io.print(cast<str>(math.square(7)));\n\
+                     io.print(cast<str>(math.clamp(42, 0, 10)));\n\
+                     return 0;\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert_eq!(out, "49\n10\n");
+}
+
+/// A module's function has a type that can be written in binZ, so it is a
+/// value -- the same rule that makes `io.print` one and `container.size` not.
+#[test]
+fn a_module_function_is_a_first_class_value() {
+    let out = run_project_ok(
+        "modvalue",
+        &[
+            ("utils/math.binz", "function square(n: i32): i32 { return n * n; }\n"),
+            (
+                "main.binz",
+                "import binz/io;\n\
+                 import @root/utils/math.binz;\n\
+                 function apply(f: function(i32): i32, n: i32): i32 { return f(n); }\n\
+                 function main(): i32 {\n\
+                     const sq: function(i32): i32 = math.square;\n\
+                     io.print(cast<str>(apply(sq, 9)));\n\
+                     return 0;\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert_eq!(out, "81\n");
+}
+
+/// A module may import modules of its own, and the graph is loaded from the
+/// entry file outwards.
+#[test]
+fn a_module_may_import_another_module() {
+    let out = run_project_ok(
+        "transitive",
+        &[
+            ("math.binz", "function square(n: i32): i32 { return n * n; }\n"),
+            (
+                "shape.binz",
+                "import @root/math.binz;\n\
+                 function area(side: i32): i32 { return math.square(side); }\n",
+            ),
+            (
+                "main.binz",
+                "import binz/io;\n\
+                 import @root/shape.binz;\n\
+                 function main(): i32 { io.print(cast<str>(shape.area(5))); return 0; }\n",
+            ),
+        ],
+    );
+    assert_eq!(out, "25\n");
+}
+
+/// Names are per file: an import is visible only where it is written, and two
+/// files may define the same function without either shadowing the other.
+#[test]
+fn names_belong_to_one_file() {
+    let out = run_project_ok(
+        "perfile",
+        &[
+            ("alpha.binz", "function add(a: i32, b: i32): i32 { return a + b; }\n"),
+            (
+                "main.binz",
+                "import binz/io;\n\
+                 import @root/alpha.binz;\n\
+                 function add(a: i32, b: i32): i32 { return a * b; }\n\
+                 function main(): i32 {\n\
+                     io.print(cast<str>(add(3, 4)) + \" \" + cast<str>(alpha.add(3, 4)));\n\
+                     return 0;\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert_eq!(out, "12 7\n");
+}
+
+/// The same file reached by two paths through the graph is one module, so its
+/// functions are compiled once and are the same functions.
+#[test]
+fn a_module_is_compiled_once_however_often_it_is_imported() {
+    let path = write_project(
+        "diamond",
+        &[
+            ("math.binz", "function square(n: i32): i32 { return n * n; }\n"),
+            (
+                "shape.binz",
+                "import @root/math.binz;\n\
+                 function area(side: i32): i32 { return math.square(side); }\n",
+            ),
+            (
+                "main.binz",
+                "import @root/math.binz;\n\
+                 import @root/shape.binz;\n\
+                 function main(): i32 { return math.square(2) - shape.area(2); }\n",
+            ),
+        ],
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_binz")).arg("build").arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // `main`, `area`, `square` -- `square` once, not once per importer.
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("3 functions"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn rejects_an_import_cycle() {
+    let err = run_project_err(
+        "cycle",
+        &[
+            ("a.binz", "import @root/b.binz;\nfunction f(): i32 { return b.g(); }\n"),
+            ("b.binz", "import @root/a.binz;\nfunction g(): i32 { return a.f(); }\n"),
+            ("main.binz", "import @root/a.binz;\nfunction main(): i32 { return a.f(); }\n"),
+        ],
+    );
+    assert!(
+        err.contains("import cycle: @root/a.binz -> @root/b.binz -> @root/a.binz"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn rejects_a_module_that_defines_main() {
+    let err = run_project_err(
+        "modmain",
+        &[
+            ("lib.binz", "function main(): i32 { return 0; }\n"),
+            ("main.binz", "import @root/lib.binz;\nfunction main(): i32 { return 0; }\n"),
+        ],
+    );
+    assert!(err.contains("only the file passed to `binz`"), "{}", err);
+}
+
+#[test]
+fn rejects_a_module_file_that_is_not_there() {
+    let err = run_project_err(
+        "missing",
+        &[("main.binz", "import @root/nope.binz;\nfunction main(): i32 { return 0; }\n")],
+    );
+    assert!(err.contains("cannot read `@root/nope.binz`"), "{}", err);
+}
+
+/// The file name *is* the binding, so it has to be an identifier, and the
+/// diagnostic says so rather than complaining about a stray `-`.
+#[test]
+fn rejects_a_module_file_name_that_is_not_one_lowercase_word() {
+    let err = run_project_err(
+        "hyphen",
+        &[("main.binz", "import @root/some-module.binz;\nfunction main(): i32 { return 0; }\n")],
+    );
+    assert!(err.contains("`-` cannot appear in a module file name"), "{}", err);
+
+    let err = run_project_err(
+        "capital",
+        &[("main.binz", "import @root/Math.binz;\nfunction main(): i32 { return 0; }\n")],
+    );
+    assert!(err.contains("is lowercase, like every module name"), "{}", err);
+}
+
+#[test]
+fn rejects_a_local_import_without_its_extension() {
+    let err = run_project_err(
+        "noext",
+        &[("main.binz", "import @root/math;\nfunction main(): i32 { return 0; }\n")],
+    );
+    assert!(err.contains("write `@root/math.binz`"), "{}", err);
+}
+
+#[test]
+fn rejects_an_anchor_that_is_not_root() {
+    let err = run_project_err(
+        "anchor",
+        &[("main.binz", "import @project/math.binz;\nfunction main(): i32 { return 0; }\n")],
+    );
+    assert!(err.contains("every local import starts at `@root`"), "{}", err);
+}
+
+/// `io.print` means one thing everywhere, so a file of the project cannot
+/// take a standard library module's name.
+#[test]
+fn rejects_a_local_module_named_after_a_standard_library_module() {
+    let err = run_project_err(
+        "shadowstd",
+        &[
+            ("io.binz", "function print(s: str): void { return; }\n"),
+            ("main.binz", "import @root/io.binz;\nfunction main(): i32 { return 0; }\n"),
+        ],
+    );
+    assert!(err.contains("is the standard library module `binz/io`"), "{}", err);
+}
+
+#[test]
+fn a_local_module_owns_its_binding_in_the_file_that_imports_it() {
+    let err = run_project_err(
+        "binding",
+        &[
+            ("math.binz", "function square(n: i32): i32 { return n * n; }\n"),
+            (
+                "main.binz",
+                "import @root/math.binz;\n\
+                 function main(): i32 { const math: i32 = 1; return math; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("is the imported module `@root/math.binz`"), "{}", err);
+}
+
+#[test]
+fn rejects_importing_the_same_module_twice() {
+    let err = run_project_err(
+        "twice",
+        &[
+            ("math.binz", "function square(n: i32): i32 { return n * n; }\n"),
+            (
+                "main.binz",
+                "import @root/math.binz;\nimport @root/math.binz;\n\
+                 function main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("`@root/math.binz` is already imported in this file"), "{}", err);
+}
+
+#[test]
+fn rejects_a_member_the_module_does_not_define() {
+    let err = run_project_err(
+        "nomember",
+        &[
+            ("math.binz", "function square(n: i32): i32 { return n * n; }\n"),
+            (
+                "main.binz",
+                "import @root/math.binz;\nfunction main(): i32 { return math.cube(2); }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("`@root/math.binz` has no function `cube`"), "{}", err);
+}
+
+/// A module exports its functions and nothing else, so a struct stays inside
+/// the file that declares it -- including in the signature of an exported
+/// function, which the importing file would have no way to write down.
+#[test]
+fn rejects_reaching_a_struct_through_a_module() {
+    let err = run_project_err(
+        "structexport",
+        &[
+            ("shapes.binz", "struct P { x: i32 }\nfunction make(): P { return P{x: 1}; }\n"),
+            (
+                "main.binz",
+                "import @root/shapes.binz;\nfunction main(): i32 { return shapes.make().x; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("a module exports its functions, not its types"), "{}", err);
+
+    let err = run_project_err(
+        "structname",
+        &[
+            ("shapes.binz", "struct P { x: i32 }\nfunction one(): i32 { return 1; }\n"),
+            (
+                "main.binz",
+                "import @root/shapes.binz;\nfunction main(): i32 { return shapes.P(); }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("is a struct in `@root/shapes.binz`"), "{}", err);
+}
+
+/// A span alone no longer says where an error is, so every diagnostic names
+/// the file it came from.
+#[test]
+fn a_diagnostic_names_the_file_it_came_from() {
+    let err = run_project_err(
+        "blame",
+        &[
+            ("broken.binz", "function bad(): i32 { return \"x\"; }\n"),
+            (
+                "main.binz",
+                "import @root/broken.binz;\nfunction main(): i32 { return broken.bad(); }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("broken.binz:1:30"), "{}", err);
+    assert!(err.contains("expected `i32`, found `str`"), "{}", err);
+}
+
+/// A module imports what it uses; the file that imports it is not a scope.
+#[test]
+fn a_module_imports_its_own_dependencies() {
+    let err = run_project_err(
+        "ownimports",
+        &[
+            ("math.binz", "function shout(): void { io.print(\"hi\"); }\n"),
+            (
+                "main.binz",
+                "import binz/io;\nimport @root/math.binz;\n\
+                 function main(): i32 { math.shout(); return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("`io` is not imported"), "{}", err);
+}
+
+// ------------------------------------------- `as`, only where it is forced
+
+/// Two directories may hold two files of the same name. That is the only
+/// situation `as` exists for -- and then every one of them is renamed, so the
+/// name is never the default for one import and a rename for another.
+#[test]
+fn two_modules_of_the_same_name_are_both_renamed() {
+    let out = run_project_ok(
+        "bothrenamed",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import binz/io;\n\
+                 import @root/geometry/math.binz as geomath;\n\
+                 import @root/utils/math.binz as utilmath;\n\
+                 function main(): i32 {\n\
+                     io.print(cast<str>(geomath.area(5)) + \" \" + cast<str>(utilmath.double(5)));\n\
+                     return 0;\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert_eq!(out, "25 10\n");
+}
+
+#[test]
+fn rejects_a_name_clash_with_neither_import_renamed() {
+    let err = run_project_err(
+        "clashbare",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import @root/geometry/math.binz;\nimport @root/utils/math.binz;\n\
+                 function main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(
+        err.contains(
+            "`@root/geometry/math.binz` and `@root/utils/math.binz` are named `math`"
+        ),
+        "{}",
+        err
+    );
+    assert!(err.contains("every one of them is renamed"), "{}", err);
+}
+
+/// Renaming one of them is not enough: the other would still hold the name by
+/// default, which is the asymmetry the rule exists to prevent.
+#[test]
+fn rejects_a_name_clash_with_only_one_import_renamed() {
+    let err = run_project_err(
+        "clashhalf",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import @root/geometry/math.binz;\nimport @root/utils/math.binz as utilmath;\n\
+                 function main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("every one of them is renamed"), "{}", err);
+    assert!(err.contains("main.binz:1:1"), "{}", err);
+}
+
+/// Without a clash there is nothing to resolve, and `as` would be a second
+/// spelling for one module.
+#[test]
+fn rejects_a_rename_with_nothing_to_resolve() {
+    let err = run_project_err(
+        "lonerename",
+        &[
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import @root/utils/math.binz as utilmath;\nfunction main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("`as` renames a module only when two or more"), "{}", err);
+    assert!(err.contains("is the only `math` in this file"), "{}", err);
+}
+
+/// No two standard library modules are named the same, so `as` can never be
+/// forced on one -- `io.print` reads identically in every file.
+#[test]
+fn rejects_renaming_a_standard_library_module() {
+    let err = run_project_err(
+        "stdrename",
+        &[("main.binz", "import binz/io as out;\nfunction main(): i32 { return 0; }\n")],
+    );
+    assert!(err.contains("`binz/io` is always reached as `io`"), "{}", err);
+}
+
+#[test]
+fn rejects_a_rename_to_the_name_the_module_already_has() {
+    let err = run_project_err(
+        "selfrename",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import @root/geometry/math.binz as math;\n\
+                 import @root/utils/math.binz as utilmath;\n\
+                 function main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("a rename gives it a different one"), "{}", err);
+}
+
+#[test]
+fn rejects_a_rename_onto_a_standard_library_name() {
+    let err = run_project_err(
+        "renameonstd",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import @root/geometry/math.binz as io;\n\
+                 import @root/utils/math.binz as utilmath;\n\
+                 function main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("is the standard library module `binz/io`"), "{}", err);
+}
+
+#[test]
+fn rejects_two_renames_onto_the_same_name() {
+    let err = run_project_err(
+        "renameclash",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import @root/geometry/math.binz as m;\nimport @root/utils/math.binz as m;\n\
+                 function main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("`m` is already imported in this file"), "{}", err);
+}
+
+/// A clash is per file, so the same module is `math` in a file that imports
+/// only it, and renamed in one that does not.
+#[test]
+fn a_clash_is_per_file() {
+    let out = run_project_ok(
+        "perfileclash",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "only.binz",
+                "import @root/utils/math.binz;\n\
+                 function twice(n: i32): i32 { return math.double(n); }\n",
+            ),
+            (
+                "main.binz",
+                "import binz/io;\n\
+                 import @root/only.binz;\n\
+                 import @root/geometry/math.binz as geomath;\n\
+                 import @root/utils/math.binz as utilmath;\n\
+                 function main(): i32 {\n\
+                     io.print(cast<str>(only.twice(4)) + \" \" + cast<str>(geomath.area(3))\n\
+                              + \" \" + cast<str>(utilmath.double(1)));\n\
+                     return 0;\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert_eq!(out, "8 9 2\n");
+}
+
+/// A rename is a module name like any other: one lowercase word.
+#[test]
+fn rejects_a_rename_that_is_not_one_lowercase_word() {
+    let err = run_project_err(
+        "renamecase",
+        &[
+            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            (
+                "main.binz",
+                "import @root/geometry/math.binz as GeoMath;\n\
+                 import @root/utils/math.binz as utilmath;\n\
+                 function main(): i32 { return 0; }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("a renamed module is lowercase"), "{}", err);
 }

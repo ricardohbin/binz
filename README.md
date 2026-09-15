@@ -32,8 +32,10 @@ Every design decision below falls out of that rule.
 | `c[i]` indexes every container | one spelling for "the element at i", by position for a sequence and by key for a map |
 | `m[key] = value` is the only way into a map | it inserts when the key is new and overwrites when it is not |
 | Modules are lowercase, members are `camelCase`, types are `PascalCase` | one convention per kind of name, and a test in `src/stdlib.rs` holds the line |
-| A stdlib name is always `module.member` | no bare import, no alias, no wildcard — `io.print` reads the same in every file |
-| The binding is the last path segment, always | `binz/io` is `io`, and there is no way to rename it |
+| A module name is always `module.member` | no bare import, no wildcard — `io.print` reads the same in every file |
+| The binding is the last path segment, always | `binz/io` is `io`, `@root/utils/math.binz` is `math` |
+| `as` only when two imports in a file are named the same — and then on every one of them | a rename is never a second spelling; it exists only where there is no first one |
+| A file of the project is imported from `@root` | one path for one file, wherever it is written — no `../` |
 | `container.size(c)` / `string.size(s)` / `map.size(m)` | one `size` per type family, rather than one name resolving three ways |
 | Sequences use `find` / `erase`, sets use `contains` / `remove` | positions and keys are different questions, so they get different verbs |
 | `[T; N]` copies, `Vector<T>` aliases | one rule: frame storage is a value, heap storage is a handle |
@@ -47,6 +49,7 @@ binz run   examples/tour.binz         # compile and execute
 binz run   examples/containers.binz   # the container tour
 binz run   examples/maps.binz         # the map tour
 binz run   examples/stdlib.binz       # the standard library tour
+binz run   examples/modules.binz      # a program split over three files
 binz build examples/tour.binz         # emit examples/tour.binzc
 binz exec  examples/tour.binzc        # execute an artifact
 binz dump  examples/tour.binzc        # disassemble
@@ -347,16 +350,17 @@ A module name is one lowercase word, a member is `camelCase` (`startsWith`,
 `canParse`), and a type is `PascalCase` (`Vector<T>`, `HashMap<K, V>`) — one
 convention per kind of name, so nothing has to be looked up.
 
-That is the whole mechanism. There is no bare import, no alias, no wildcard,
-no second spelling — `io.print` reads identically in every file that uses it,
+That is the whole mechanism. There is no bare import, no wildcard, no second
+spelling — `io.print` reads identically in every file that uses it,
 and a reader never has to look up where a name came from. Every `import` goes
 at the top of the file, one module per line, before the first `struct` or
 `function`.
 
-An import owns its binding for the whole program: once `binz/io` is in scope,
-nothing else may be called `io`. Conversely, a module member never takes a
-name away from the program — `add` and `find` are ordinary words, and
-`container.add` does not stop you writing your own `function add(...)`.
+An import owns its binding for the whole file: once `binz/io` is in scope,
+nothing else in that file may be called `io`. Conversely, a module member
+never takes a name away from the program — `add` and `find` are ordinary
+words, and `container.add` does not stop you writing your own
+`function add(...)`.
 
 | Module | Covers |
 | --- | --- |
@@ -442,10 +446,15 @@ error: `io` is not imported; add `import binz/io;` at the top of the file
 error: `binz/string` has no `push`; it is in `binz/container`
 error: `binz/map` has no `values`: read `m[key]` while walking `map.keys(m)`
 error: there is no module `binz/json`; binZ has io, string, int, float, container, map
+error: cannot read `@root/nope.binz`: No such file or directory
+error: `@root/math.binz` has no function `cube`
+error: `math` is the imported module `@root/math.binz`, so it cannot also be a variable
 ```
 
 A verb a module refuses on purpose gets the line to write instead, rather
-than a pointer at another module that would refuse it too.
+than a pointer at another module that would refuse it too. A program is a
+graph of files, so every diagnostic names the file its span belongs to — which
+is not always the one on the command line.
 
 `len` was the spelling before the standard library had modules, so it gets its
 own:
@@ -456,10 +465,106 @@ write `string.size`, `container.size` or `map.size` after
 `import binz/string; import binz/container; import binz/map;`
 ```
 
+## Local modules
+
+A program can be more than one file. A file of this project is imported from
+`@root`, the directory of the file handed to `binz`:
+
+```c
+// examples/modules.binz
+import binz/io;
+import @root/modules/geometry.binz;
+
+function main(): i32 {
+    io.print(cast<str>(geometry.square(7)));
+    return 0;
+}
+```
+
+`@root` is the anchor because a path should mean the same thing wherever it is
+written. There is no `../`, no path relative to the importing file, and no way
+to reach outside the root — one file, one spelling.
+
+Everything else is the rule already in force for `binz/io`. **The binding is
+the file's own name**, always, with no way to rename it: `geometry.binz` binds
+`geometry`. That is why a module file is named with one lowercase word — the
+name is not decoration, it is the identifier the importing file will type, so
+`some-module.binz` is refused where it is written:
+
+```
+error: `-` cannot appear in a module file name: the name is the binding, the
+`math` you would write in `math.square`, so it is one lowercase word
+```
+
+A module is an ordinary `.binz` file, with three consequences:
+
+- **It exports every function it defines, and nothing else.** There is no
+  `export` keyword and no `pub` — a module's surface is what you can read at
+  the top of it. Its structs stay inside it, including in the signature of an
+  exported function, which the importing file would have no way to write down.
+- **It imports what it uses.** The file that imports it is not a scope, so a
+  module that calls `io.print` writes `import binz/io;` itself. A module may
+  import other local modules, including ones it shares with the entry file: a
+  file reached twice through the graph is still compiled once.
+- **It does not define `main`.** `main` is the program; a module is a library.
+
+Names are per file. Two files may both define `add`, and neither shadows the
+other — `add` is this file's, `alpha.add` is the other's. A module function is
+an ordinary value, by the same rule that makes `io.print` one: its type is
+writable in binZ.
+
+```c
+const f: function(i32): i32 = geometry.square;
+```
+
+An import cycle is an error, and names the whole chain:
+
+```
+error: import cycle: @root/a.binz -> @root/b.binz -> @root/a.binz
+```
+
+### `as`, only where it is forced
+
+Two directories may hold two files of the same name. That is the one situation
+`as` exists for — and then **every one of them is renamed**, so a name is never
+the default for one import and a rename for another:
+
+```c
+import @root/text/format.binz   as textformat;
+import @root/number/format.binz as numberformat;
+```
+
+Leaving either of them bare is an error, and so is renaming just one:
+
+```
+error: `@root/text/format.binz` and `@root/number/format.binz` are named
+`format`; when two or more imports in a file are named the same, every one of
+them is renamed, as in `import @root/text/format.binz as myformat;`
+```
+
+Outside that situation `as` is refused, because a module would then have two
+spellings — the bare name and the rename — which is the thing the whole import
+design exists to avoid:
+
+```
+error: `as` renames a module only when two or more imports in a file are named
+the same; `@root/utils/math.binz` is the only `math` in this file, so it is
+imported as `math`
+```
+
+No two standard library modules are named the same, so `as` is never legal on
+one: `io.print` reads identically in every file of every program. A rename is
+a module name like any other — one lowercase word — it may not be the name the
+module already has, and it may not be a standard library module's name.
+
+A clash is per file. The same module is `math` in a file that imports only it,
+and renamed in a file that imports both.
+
 ## Implementation
 
 ```
 src/lexer.rs      source -> tokens
+src/loader.rs     entry file -> the graph of files it imports
 src/parser.rs     tokens -> AST
 src/compiler.rs   AST -> type check + bytecode, in a single pass
 src/stdlib.rs     the module table: what binz/io, binz/string, ... contain
@@ -519,8 +624,8 @@ parameter slot sizes, frame size, sret flag, code), entry index.
 
 ## Not in v0.1
 
-Slices, user-written generics, closures, user-defined modules (`import` reaches
-`binz/*` only), methods, enums/unions, bitwise operators, and
+Slices, user-written generics, closures, exported types (a module exports its
+functions only), methods, enums/unions, bitwise operators, and
 unsigned integers. The standard library is a scratch: no file or process I/O
 beyond `io.print`, no time, no random. `cast<str>` formats scalars only, so a
 container is printed by iterating it. Heap containers cannot hold structs, and their elements have no

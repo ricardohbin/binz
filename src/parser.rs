@@ -101,15 +101,27 @@ impl Parser {
         Ok(items)
     }
 
-    /// `import binz/io;` -- one module per statement, bound to the last
-    /// segment of its path and to nothing else.
+    /// `import binz/io;` or `import @root/utils/math.binz;` -- one module per
+    /// statement, bound to the last segment of its path and to nothing else.
     fn parse_import(&mut self) -> CResult<ImportDef> {
         let span = self.span();
         self.expect(Tok::Import)?;
-        let mut path = vec![self.ident()?.0];
-        while self.eat(&Tok::Slash) {
-            path.push(self.ident()?.0);
-        }
+        let (local, path) = if self.eat(&Tok::At) {
+            (true, self.parse_root_path()?)
+        } else {
+            let mut path = vec![self.ident()?.0];
+            while self.eat(&Tok::Slash) {
+                path.push(self.ident()?.0);
+            }
+            (false, path)
+        };
+        let alias = if self.eat(&Tok::As) {
+            let (name, asp) = self.ident()?;
+            check_module_name(&name, asp, "a renamed module")?;
+            Some(Alias { name, span: asp })
+        } else {
+            None
+        };
         if self.peek() == &Tok::Comma {
             return Err(CompileError::new(
                 "one module per `import`; write a second `import` line instead",
@@ -117,7 +129,63 @@ impl Parser {
             ));
         }
         self.expect(Tok::Semi)?;
-        Ok(ImportDef { path, span })
+        Ok(ImportDef { local, path, alias, span })
+    }
+
+    /// The `root/utils/math.binz` of `import @root/utils/math.binz;`, returned
+    /// as the segments below the root with the extension stripped -- so the
+    /// last one is the file's own name, which is the binding.
+    fn parse_root_path(&mut self) -> CResult<Vec<String>> {
+        let (anchor, asp) = self.ident()?;
+        if anchor != "root" {
+            return Err(CompileError::new(
+                format!(
+                    "`@{}` is not an anchor; every local import starts at `@root`, \
+                     the directory of the file passed to `binz`",
+                    anchor
+                ),
+                asp,
+            ));
+        }
+        let mut path = Vec::new();
+        while self.eat(&Tok::Slash) {
+            let (seg, ssp) = self.ident()?;
+            check_path_segment(&seg, ssp)?;
+            path.push(seg);
+        }
+        if path.is_empty() {
+            return Err(CompileError::new(
+                "`@root` is a directory; name a file in it, as in `@root/math.binz`",
+                asp,
+            ));
+        }
+        // A file name is one lowercase word because it *is* the binding, so
+        // `math-utils.binz` stops here rather than at an unreadable `math.add`.
+        if self.peek() == &Tok::Minus {
+            return Err(CompileError::new(
+                "`-` cannot appear in a module file name: the name is the binding, \
+                 the `math` you would write in `math.square`, so it is one lowercase word",
+                self.span(),
+            ));
+        }
+        if self.peek() == &Tok::Semi {
+            return Err(CompileError::new(
+                format!(
+                    "a local import names the file, extension and all; write `@root/{}.binz`",
+                    path.join("/")
+                ),
+                self.span(),
+            ));
+        }
+        self.expect(Tok::Dot)?;
+        let (ext, esp) = self.ident()?;
+        if ext != "binz" {
+            return Err(CompileError::new(
+                format!("`.{}` is not a binZ source file; a local import ends in `.binz`", ext),
+                esp,
+            ));
+        }
+        Ok(path)
     }
 
     fn parse_struct(&mut self) -> CResult<StructDef> {
@@ -578,4 +646,29 @@ impl Stmt {
             | Stmt::Nested(_, span) => *span,
         }
     }
+}
+
+/// A directory or file name inside `@root/...` is lowercase, like a module
+/// name -- the file's own name becomes the binding, and binZ spells a module
+/// in lowercase. One convention, checked where the path is written.
+fn check_path_segment(seg: &str, span: Span) -> CResult<()> {
+    check_module_name(
+        seg,
+        span,
+        "a directory or file under `@root`",
+    )
+}
+
+/// One lowercase word, which is how binZ spells every module name -- so an
+/// `as` rename reads exactly like the name it replaces.
+fn check_module_name(name: &str, span: Span, what: &str) -> CResult<()> {
+    let ok = name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if !ok {
+        return Err(CompileError::new(
+            format!("`{}` is not a module name; {} is lowercase, like every module name", name, what),
+            span,
+        ));
+    }
+    Ok(())
 }

@@ -1,0 +1,48 @@
+// Local modules. `@root` is the directory of the file handed to `binz`, so
+// every path is written from the same place no matter which file writes it:
+// there is no `../`, and one file has exactly one spelling.
+//
+//     import @root/modules/geometry.binz;
+//
+// The binding is the file's own name -- `geometry` -- exactly as the last
+// segment of `binz/io` binds `io`. That is why a module file is named with
+// one lowercase word: the name is not decoration, it is the identifier the
+// importing file types. A module exports every function it defines, and
+// nothing else: its structs stay inside it.
+//
+// Two directories may hold two files of the same name. That is the one
+// situation `as` exists for -- and then *every* one of them is renamed, so a
+// name is never the default for one import and a rename for another. Outside
+// that situation `as` is an error, because a module would have two spellings.
+//
+// Run this from anywhere:  binz run examples/modules.binz
+
+import binz/io;
+import binz/container;
+import @root/modules/geometry.binz;
+import @root/modules/tally.binz;
+import @root/modules/text/format.binz as textformat;
+import @root/modules/number/format.binz as numberformat;
+
+function main(): i32 {
+    io.print("-- geometry --");
+    io.print("square(7)          = " + cast<str>(geometry.square(7)));
+    io.print("circleArea(2.0)    = " + cast<str>(geometry.circleArea(2.0)));
+    io.print("hypotenuse(3, 4)   = " + cast<str>(geometry.hypotenuse(3.0, 4.0)));
+
+    io.print("-- tally, which imports geometry itself --");
+    const v: Vector<i32> = Vector<i32>{ 1, 2, 3, 4 };
+    io.print("sum                = " + cast<str>(tally.sum(v)));
+    io.print("sumOfSquares       = " + cast<str>(tally.sumOfSquares(v)));
+
+    io.print("-- two modules named `format`, so both are renamed --");
+    io.print(textformat.pad("left", 10) + textformat.quote("right"));
+    io.print(numberformat.percent(0.4267) + " " + numberformat.fixed(2.71828));
+
+    // A module's function is an ordinary value, because its type is writable
+    // in binZ -- the same rule that makes `io.print` a value.
+    io.print("-- as a value --");
+    const f: function(i32): i32 = geometry.square;
+    io.print("f(9)               = " + cast<str>(f(9)));
+    return 0;
+}
