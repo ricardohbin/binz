@@ -1,5 +1,5 @@
 //! The binZ standard library: `binz/io`, `binz/string`, `binz/int`,
-//! `binz/float` and `binz/container`.
+//! `binz/float`, `binz/container` and `binz/map`.
 //!
 //! A module is made visible with `import binz/<name>;` and every one of its
 //! members is then reached as `<name>.<member>`. That is the only spelling:
@@ -17,6 +17,11 @@
 //!     `i64`). The compiler resolves them at the call site, and they are not
 //!     values.
 //!
+//! `size`, `find` and `contains` are per *type family*, not universal: a
+//! `str` answers `binz/string`, a container answers `binz/container`, and a
+//! map answers `binz/map`. One name means one thing per family, which is
+//! cheaper to learn than one name that resolves three ways.
+//!
 //! So the rule is: **a stdlib function is a value exactly when its type is
 //! writable in binZ.** Nothing else distinguishes the two tables.
 //!
@@ -29,7 +34,7 @@ use crate::types::{Kind, Type};
 
 /// Every module, in the order they are documented. The `binz/` prefix is
 /// part of the import path and is not repeated here.
-pub const MODULES: &[&str] = &["io", "string", "int", "float", "container"];
+pub const MODULES: &[&str] = &["io", "string", "int", "float", "container", "map"];
 
 pub type NativeSig = fn() -> Type;
 
@@ -110,7 +115,17 @@ pub const FORMS: &[Form] = &[
     Form { module: "container", name: "contains", id: B_CONTAINS, arity: 2 },
     Form { module: "container", name: "clear", id: B_CLEAR, arity: 1 },
     Form { module: "container", name: "copy", id: B_COPY, arity: 1 },
-    Form { module: "container", name: "keys", id: B_KEYS, arity: 1 },
+    // --------------------------------------------------------- binz/map
+    // Every map operation, for `HashMap<K, V>` and `SortedMap<K, V>` alike.
+    // There is deliberately no `add`/`insert`/`put`: `m[key] = value` is
+    // the one way in, and no `values`: `m[key]` already answers that while
+    // walking `map.keys`.
+    Form { module: "map", name: "size", id: B_SIZE, arity: 1 },
+    Form { module: "map", name: "contains", id: B_CONTAINS, arity: 2 },
+    Form { module: "map", name: "remove", id: B_REMOVE, arity: 2 },
+    Form { module: "map", name: "keys", id: B_KEYS, arity: 1 },
+    Form { module: "map", name: "clear", id: B_CLEAR, arity: 1 },
+    Form { module: "map", name: "copy", id: B_COPY, arity: 1 },
     // --------------------------------------------------------- binz/int
     // Generic over `i32` and `i64`: the result is the argument's own type,
     // so no `cast` is forced on either width.
@@ -137,6 +152,24 @@ pub fn find_form(module: &str, name: &str) -> Option<&'static Form> {
 pub fn native_name(idx: u32) -> String {
     let n = &NATIVES[idx as usize];
     format!("{}.{}", n.module, n.name)
+}
+
+/// Verbs a module deliberately does not define, and the line to write
+/// instead. Without this, `map.find(m, k)` would be answered by pointing at
+/// `binz/container`, which does not accept a map either.
+pub const MISUSED: &[(&str, &str, &str)] = &[
+    ("map", "find", "a map is keyed by value; use `map.contains`"),
+    ("map", "add", "write `m[key] = value`"),
+    ("map", "push", "write `m[key] = value`"),
+    ("map", "insert", "write `m[key] = value`"),
+    ("map", "erase", "a map has no positions; use `map.remove`"),
+    ("map", "pop", "a map has no positions"),
+    ("map", "values", "read `m[key]` while walking `map.keys(m)`"),
+    ("container", "keys", "only a map has keys"),
+];
+
+pub fn misused(module: &str, name: &str) -> Option<&'static str> {
+    MISUSED.iter().find(|e| e.0 == module && e.1 == name).map(|e| e.2)
 }
 
 pub fn form_name(id: u8) -> &'static str {
@@ -166,14 +199,20 @@ pub fn renamed_to(name: &str) -> Option<&'static str> {
     RENAMED.iter().find(|r| r.0 == name).map(|r| r.1)
 }
 
+/// "a", "a or b", "a, b or c" -- so a diagnostic listing three modules reads
+/// as a sentence rather than as a chain of `or`s.
+pub fn join_or(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        n => format!("{} or {}", items[..n - 1].join(", "), items[n - 1]),
+    }
+}
+
 /// "`binz/string`" / "`binz/string` or `binz/container`", for diagnostics.
 pub fn describe_modules(mods: &[&str]) -> String {
     let paths: Vec<String> = mods.iter().map(|m| format!("`binz/{}`", m)).collect();
-    match paths.len() {
-        0 => String::new(),
-        1 => paths[0].clone(),
-        _ => format!("{} or {}", paths[..paths.len() - 1].join(", "), paths[paths.len() - 1]),
-    }
+    join_or(&paths)
 }
 
 #[cfg(test)]
@@ -239,6 +278,22 @@ mod tests {
         // ... and so is a module name, which is one word and all lowercase.
         for m in MODULES {
             assert!(m.chars().all(|c| c.is_ascii_lowercase()), "module `{}` is not lowercase", m);
+        }
+    }
+
+    /// A verb a module refuses is named by exactly one module, and is not
+    /// also defined there -- otherwise the hint and the member would
+    /// contradict each other.
+    #[test]
+    fn refused_verbs_are_not_also_defined() {
+        for (m, n, _) in MISUSED {
+            assert!(is_module(m), "`{}` is not a declared module", m);
+            assert!(
+                find_native(m, n).is_none() && find_form(m, n).is_none(),
+                "`{}.{}` is both defined and refused",
+                m,
+                n
+            );
         }
     }
 

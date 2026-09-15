@@ -1,7 +1,9 @@
-// Containers: one fixed-size value type, four heap containers, and one
-// spelling for every operation that all of them share. Every verb lives in
-// `binz/container` and is reached through it, so `size` on a container and
-// `size` on a str are never the same name resolving two ways.
+// Containers: one fixed-size value type and four heap containers. There is one
+// spelling for every operation, and it always names the family it belongs to --
+// `binz/container` here, `binz/string` for a str, `binz/map` for a map. So
+// `size` is never one name resolving three ways.
+//
+// The two maps have their own tour, in `examples/maps.binz`.
 
 import binz/io;
 import binz/string;
@@ -117,32 +119,8 @@ function main(): i32 {
     line("ranked", join(asText));
     line("has 30", cast<str>(container.contains(ranked, 30)));
 
-    // -------------------------------- HashMap<K, V>, keyed by value, one way in
-    // `m[key] = value` inserts when the key is new and overwrites when it is
-    // not, so it is the only way to put an entry in.
-    var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31, "bruno": 27};
-    ages["carla"] = 45;
-    ages["ana"] = 32;
-    line("ana", cast<str>(ages["ana"]));
-    line("has bruno", cast<str>(container.contains(ages, "bruno")));
-    line("dropped bruno", cast<str>(container.remove(ages, "bruno")));
-
-    // `container.keys` hands back a Vector in insertion order: that is how a map
-    // is walked, since `m[k]` is already keyed by value.
-    const who: Vector<str> = container.keys(ages);
-    var pairs: Vector<str> = Vector<str>{};
-    i = 0;
-    while (i < container.size(who)) {
-        container.push(pairs, who[i] + "=" + cast<str>(ages[who[i]]));
-        i = i + 1;
-    }
-    line("ages", join(pairs));
-
-    // Reading a key that is not there traps -- binZ has no `null`, so
-    // `container.contains` is the guard.
-    line("has zed", cast<str>(container.contains(ages, "zed")));
-
-    // A str is not a container, so its size comes from `binz/string`.
+    // A str is not a container, so its size comes from `binz/string`. Neither
+    // is a map: see `examples/maps.binz`.
     line("size of a str", cast<str>(string.size("binZ")));
     return 0;
 }

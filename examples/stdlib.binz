@@ -8,6 +8,7 @@ import binz/string;
 import binz/int;
 import binz/float;
 import binz/container;
+import binz/map;
 
 function line(label: str, text: str): void {
     io.print(label + ": " + text);
@@ -80,15 +81,24 @@ function main(): i32 {
     line("words", string.join(words, ""));
     line("find C", cast<str>(container.find(words, "C")));
 
+    // A map is its own family: `binz/map` answers for both maps, and
+    // `container.size(tally)` is an error that names `map.size`.
     var tally: HashMap<str, i32> = HashMap<str, i32>{};
     tally["a"] = 1;
     tally["b"] = 2;
-    line("has a", cast<str>(container.contains(tally, "a")));
-    line("keys", string.join(container.keys(tally), ","));
+    line("has a", cast<str>(map.contains(tally, "a")));
+    line("keys", string.join(map.keys(tally), ","));
+
+    // The same six verbs, on the map that keeps its keys in order.
+    var ranked: SortedMap<str, i32> = SortedMap<str, i32>{"z": 26, "a": 1};
+    ranked["m"] = 13;
+    line("sorted keys", string.join(map.keys(ranked), ","));
+    line("size", cast<str>(map.size(ranked)));
 
     // A monomorphic stdlib function has a type binZ can write, so it is an
-    // ordinary value. A generic one -- `container.size` over five containers
-    // -- has no such type and must be called directly.
+    // ordinary value. A generic one -- `container.size` over five containers,
+    // `map.keys` over two maps -- has no such type and must be called
+    // directly.
     const say: function(str): void = io.print;
     say("first-class, because `function(str): void` is writable");
 

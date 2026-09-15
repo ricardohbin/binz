@@ -17,7 +17,7 @@ fn write_temp(name: &str, src: &str) -> std::path::PathBuf {
 /// so a test only has to say what it is about. The import rules themselves
 /// are exercised by `run_raw_err`, which writes its own file head.
 const PRELUDE: &str = "import binz/io;\nimport binz/string;\nimport binz/int;\n\
-                       import binz/float;\nimport binz/container;\n";
+                       import binz/float;\nimport binz/container;\nimport binz/map;\n";
 
 /// Runs a program, asserting it exits 0, and returns its stdout.
 fn run_ok(name: &str, src: &str) -> String {
@@ -549,10 +549,10 @@ fn hashmap_reads_writes_and_iterates() {
             var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31, "bruno": 27};
             ages["carla"] = 45;
             ages["ana"] = 32;
-            io.print(cast<str>(container.size(ages)) + " " + cast<str>(ages["ana"]));
-            io.print(cast<str>(container.contains(ages, "bruno")) + " " + cast<str>(container.contains(ages, "zed")));
-            io.print(cast<str>(container.remove(ages, "bruno")) + " " + cast<str>(container.remove(ages, "bruno")));
-            const ks: Vector<str> = container.keys(ages);
+            io.print(cast<str>(map.size(ages)) + " " + cast<str>(ages["ana"]));
+            io.print(cast<str>(map.contains(ages, "bruno")) + " " + cast<str>(map.contains(ages, "zed")));
+            io.print(cast<str>(map.remove(ages, "bruno")) + " " + cast<str>(map.remove(ages, "bruno")));
+            const ks: Vector<str> = map.keys(ages);
             var i: i32 = 0;
             var line: str = "";
             while (i < container.size(ks)) {
@@ -560,8 +560,8 @@ fn hashmap_reads_writes_and_iterates() {
                 i = i + 1;
             }
             io.print(line);
-            container.clear(ages);
-            io.print(cast<str>(container.size(ages)));
+            map.clear(ages);
+            io.print(cast<str>(map.size(ages)));
         "#,
         ),
     );
@@ -578,7 +578,7 @@ fn hashmap_aliases_and_copies_deeply() {
             a["xs"] = Vector<i32>{1, 2};
             const shared: HashMap<str, Vector<i32>> = a;
             container.push(shared["xs"], 3);
-            const mine: HashMap<str, Vector<i32>> = container.copy(a);
+            const mine: HashMap<str, Vector<i32>> = map.copy(a);
             container.push(mine["xs"], 4);
             io.print(cast<str>(container.size(a["xs"])) + " " + cast<str>(container.size(mine["xs"])));
         "#,
@@ -594,21 +594,45 @@ fn hashmap_keeps_each_key_once() {
         &in_main(
             r#"
             const m: HashMap<i32, str> = HashMap<i32, str>{1: "one", 1: "uno"};
-            io.print(cast<str>(container.size(m)) + " " + m[1]);
+            io.print(cast<str>(map.size(m)) + " " + m[1]);
         "#,
         ),
     );
     assert_eq!(out, "1 uno\n");
 }
 
+/// `binz/map` and `binz/container` are two type families: each sends the
+/// other's types back with the line that does work.
 #[test]
-fn rejects_the_wrong_builtin_for_a_hashmap() {
-    let e = run_err("mapop", &in_main("var m: HashMap<str, i32> = HashMap<str, i32>{}; container.push(m, 1);"));
+fn a_map_and_a_container_each_name_the_other() {
+    let m = "var m: HashMap<str, i32> = HashMap<str, i32>{}; ";
+    let e = run_err("mapop", &in_main(&format!("{}container.push(m, 1);", m)));
     assert!(e.contains("write `m[key] = value`"), "{}", e);
-    let e = run_err("mapop2", &in_main("var m: HashMap<str, i32> = HashMap<str, i32>{}; container.erase(m, 0);"));
-    assert!(e.contains("use `container.remove`"), "{}", e);
-    let e = run_err("mapop3", &in_main("var v: Vector<i32> = Vector<i32>{}; const k: Vector<i32> = container.keys(v);"));
-    assert!(e.contains("only defined for a `HashMap<K, V>`"), "{}", e);
+    let e = run_err("mapop2", &in_main(&format!("{}container.erase(m, 0);", m)));
+    assert!(e.contains("use `map.remove`"), "{}", e);
+    let e = run_err("mapop4", &in_main(&format!("{}io.print(cast<str>(container.size(m)));", m)));
+    assert!(e.contains("a map answers `map.size`"), "{}", e);
+
+    let v = "var v: Vector<i32> = Vector<i32>{}; ";
+    let e = run_err("mapop3", &in_main(&format!("{}const k: Vector<i32> = map.keys(v);", v)));
+    assert!(e.contains("`map.keys` needs a map, found `Vector<i32>`"), "{}", e);
+    let e = run_err("mapop5", &in_main(&format!("{}io.print(cast<str>(map.size(v)));", v)));
+    assert!(e.contains("a container answers `container.size`"), "{}", e);
+}
+
+/// The verbs a map deliberately refuses name the one line that works,
+/// rather than pointing at `binz/container`, which refuses a map too.
+#[test]
+fn rejects_the_verbs_a_map_does_not_have() {
+    let m = "var m: HashMap<str, i32> = HashMap<str, i32>{}; ";
+    let e = run_err("mapno1", &in_main(&format!("{}map.add(m, \"a\");", m)));
+    assert!(e.contains("`binz/map` has no `add`: write `m[key] = value`"), "{}", e);
+    let e = run_err("mapno2", &in_main(&format!("{}map.find(m, \"a\");", m)));
+    assert!(e.contains("use `map.contains`"), "{}", e);
+    let e = run_err("mapno3", &in_main(&format!("{}map.values(m);", m)));
+    assert!(e.contains("read `m[key]` while walking `map.keys(m)`"), "{}", e);
+    let e = run_err("mapno4", &in_main("var v: Vector<i32> = Vector<i32>{}; container.keys(v);"));
+    assert!(e.contains("`binz/container` has no `keys`: only a map has keys"), "{}", e);
 }
 
 #[test]
@@ -636,6 +660,133 @@ fn traps_on_a_missing_hashmap_key() {
         &in_main("const m: HashMap<str, i32> = HashMap<str, i32>{\"a\": 1}; io.print(cast<str>(m[\"b\"]));"),
     );
     assert!(e.contains("is not in the HashMap"), "{}", e);
+}
+
+/// The one thing that tells `SortedMap` from `HashMap`: `map.keys` answers
+/// ascending instead of in insertion order. Everything else is the same.
+#[test]
+fn a_sorted_map_hands_back_its_keys_in_order() {
+    let out = run_ok(
+        "smorder",
+        &in_main(
+            r#"
+            var by_name: SortedMap<str, i32> = SortedMap<str, i32>{"pear": 3, "apple": 1};
+            by_name["fig"] = 2;
+            by_name["apple"] = 10;
+            const ks: Vector<str> = map.keys(by_name);
+            var i: i32 = 0;
+            var line: str = "";
+            while (i < container.size(ks)) {
+                line = line + ks[i] + "=" + cast<str>(by_name[ks[i]]) + " ";
+                i = i + 1;
+            }
+            io.print(line);
+
+            const same: HashMap<str, i32> = HashMap<str, i32>{"pear": 3, "apple": 1, "fig": 2};
+            const hk: Vector<str> = map.keys(same);
+            io.print(hk[0] + " " + hk[1] + " " + hk[2]);
+        "#,
+        ),
+    );
+    assert_eq!(out, "apple=10 fig=2 pear=3 \npear apple fig\n");
+}
+
+/// A `SortedMap` answers every member of `binz/map`, and aliases and copies
+/// exactly as the other heap containers do.
+#[test]
+fn a_sorted_map_answers_every_map_verb() {
+    let out = run_ok(
+        "smverbs",
+        &in_main(
+            r#"
+            var m: SortedMap<i32, str> = SortedMap<i32, str>{3: "c", 1: "a"};
+            m[2] = "b";
+            io.print(cast<str>(map.size(m)) + " " + m[2]);
+            io.print(cast<str>(map.contains(m, 2)) + " " + cast<str>(map.contains(m, 9)));
+            io.print(cast<str>(map.remove(m, 2)) + " " + cast<str>(map.remove(m, 2)));
+
+            const aliased: SortedMap<i32, str> = m;
+            aliased[7] = "g";
+            const mine: SortedMap<i32, str> = map.copy(m);
+            mine[8] = "h";
+            io.print(cast<str>(map.size(m)) + " " + cast<str>(map.size(mine)));
+
+            map.clear(m);
+            io.print(cast<str>(map.size(m)));
+        "#,
+        ),
+    );
+    assert_eq!(out, "3 b\ntrue false\ntrue false\n3 4\n0\n");
+}
+
+/// The red-black tree driven from binZ itself: every key inserted, every
+/// other one deleted, and the survivors still ascending.
+#[test]
+fn a_sorted_map_stays_ordered_through_churn() {
+    let out = run_ok(
+        "smchurn",
+        &in_main(
+            r#"
+            var m: SortedMap<i32, i32> = SortedMap<i32, i32>{};
+            var i: i32 = 0;
+            while (i < 500) {
+                m[(i * 37) % 500] = i;
+                i = i + 1;
+            }
+            i = 0;
+            while (i < 500) {
+                map.remove(m, i);
+                i = i + 2;
+            }
+            const ks: Vector<i32> = map.keys(m);
+            var ordered: bool = true;
+            i = 1;
+            while (i < container.size(ks)) {
+                if (ks[i] <= ks[i - 1]) { ordered = false; }
+                i = i + 1;
+            }
+            io.print(cast<str>(map.size(m)) + " " + cast<str>(ordered) + " " + cast<str>(ks[0]));
+        "#,
+        ),
+    );
+    assert_eq!(out, "250 true 1\n");
+}
+
+/// A sorted map has to compare its keys, so it inherits the rule that put
+/// NaN out of a `SortedSet`.
+#[test]
+fn a_sorted_map_rejects_nan_as_a_key() {
+    let e = run_err(
+        "smnan",
+        &in_main("var m: SortedMap<f64, i32> = SortedMap<f64, i32>{}; m[0.0 / 0.0] = 1;"),
+    );
+    assert!(e.contains("NaN"), "{}", e);
+}
+
+/// No `null`, so an absent key traps and the message names the guard.
+#[test]
+fn traps_on_a_missing_sorted_map_key() {
+    let e = run_err(
+        "smmiss",
+        &in_main("const m: SortedMap<str, i32> = SortedMap<str, i32>{\"a\": 1}; io.print(cast<str>(m[\"b\"]));"),
+    );
+    assert!(e.contains("is not in the SortedMap"), "{}", e);
+    assert!(e.contains("`map.contains`"), "{}", e);
+}
+
+/// A map is reached by key and nothing else, whichever map it is.
+#[test]
+fn rejects_positional_access_to_a_sorted_map() {
+    let e = run_err(
+        "smpos",
+        &in_main("var m: SortedMap<str, i32> = SortedMap<str, i32>{}; container.push(m, 1);"),
+    );
+    assert!(e.contains("write `m[key] = value`"), "{}", e);
+    let e = run_err(
+        "smkey",
+        &in_main("var m: SortedMap<str, i32> = SortedMap<str, i32>{}; m[1] = 2;"),
+    );
+    assert!(e.contains("in a key: expected `str`"), "{}", e);
 }
 
 // ------------------------------------------------------ the standard library

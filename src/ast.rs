@@ -1,5 +1,5 @@
 use crate::lexer::Span;
-use crate::types::Kind;
+use crate::types::{Kind, MapKind};
 
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
@@ -10,8 +10,8 @@ pub enum TypeExpr {
     Array(Box<TypeExpr>, u32, Span),
     /// `Vector<T>`, `LinkedList<T>`, `Set<T>`, `SortedSet<T>`
     Container(Kind, Box<TypeExpr>, Span),
-    /// `HashMap<K, V>`
-    Map(Box<TypeExpr>, Box<TypeExpr>, Span),
+    /// `HashMap<K, V>` / `SortedMap<K, V>`
+    Map(MapKind, Box<TypeExpr>, Box<TypeExpr>, Span),
 }
 
 impl TypeExpr {
@@ -22,7 +22,7 @@ impl TypeExpr {
             | TypeExpr::Fn(_, _, s)
             | TypeExpr::Array(_, _, s)
             | TypeExpr::Container(_, _, s)
-            | TypeExpr::Map(_, _, s) => *s,
+            | TypeExpr::Map(_, _, _, s) => *s,
         }
     }
 }
@@ -219,8 +219,9 @@ pub enum Expr {
         elems: Vec<Expr>,
         span: Span,
     },
-    /// `HashMap<str, i32>{ "a": 1, "b": 2 }`
+    /// `HashMap<str, i32>{ "a": 1, "b": 2 }`, and the same for `SortedMap`.
     MapLit {
+        kind: MapKind,
         key: TypeExpr,
         val: TypeExpr,
         entries: Vec<(Expr, Expr)>,

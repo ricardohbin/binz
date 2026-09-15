@@ -294,13 +294,14 @@ impl Compiler {
                 }
                 Type::Container(*kind, Box::new(t))
             }
-            TypeExpr::Map(k, v, sp) => {
+            TypeExpr::Map(mk, k, v, sp) => {
                 let kt = self.resolve_type(k)?;
                 let vt = self.resolve_type(v)?;
                 if !kt.is_key() {
                     return Err(CompileError::new(
                         format!(
-                            "a `HashMap` is keyed by value, so its key must be i32, i64, f64, bool or str, not `{}`",
+                            "a `{}` is keyed by value, so its key must be i32, i64, f64, bool or str, not `{}`",
+                            mk.name(),
                             self.tn(&kt)
                         ),
                         *sp,
@@ -309,14 +310,15 @@ impl Compiler {
                 if !vt.is_slot() {
                     return Err(CompileError::new(
                         format!(
-                            "`HashMap` holds one-slot values and cannot hold `{}`; put it behind a pointer, or use `[{}; N]`",
+                            "`{}` holds one-slot values and cannot hold `{}`; put it behind a pointer, or use `[{}; N]`",
+                            mk.name(),
                             self.tn(&vt),
                             self.tn(&vt)
                         ),
                         *sp,
                     ));
                 }
-                Type::Map(Box::new(kt), Box::new(vt))
+                Type::Map(*mk, Box::new(kt), Box::new(vt))
             }
         })
     }
@@ -628,7 +630,7 @@ impl Compiler {
                         // `m[key] = value` is the one way to put an entry in
                         // a map: it inserts when the key is new and
                         // overwrites when it is not.
-                        Type::Map(kt, vt) => {
+                        Type::Map(_, kt, vt) => {
                             self.code.extend_from_slice(&scratch);
                             self.compile_key(index, &kt)?;
                             let got = self.compile_expr(value, Some(&vt))?;
@@ -805,8 +807,11 @@ impl Compiler {
                         ),
                         *span,
                     )),
-                    Type::Map(..) => Err(CompileError::new(
-                        "an entry of `HashMap<...>` lives on the heap and has no address; copy it into a variable first",
+                    Type::Map(mk, ..) => Err(CompileError::new(
+                        format!(
+                            "an entry of `{}<...>` lives on the heap and has no address; copy it into a variable first",
+                            mk.name()
+                        ),
                         *span,
                     )),
                     other => Err(CompileError::new(
@@ -1017,7 +1022,7 @@ impl Compiler {
                         self.emit(OP_GET);
                         Ok(*elem)
                     }
-                    Type::Map(kt, vt) => {
+                    Type::Map(_, kt, vt) => {
                         self.compile_key(index, &kt)?;
                         self.emit(OP_GET);
                         Ok(*vt)
@@ -1039,8 +1044,8 @@ impl Compiler {
                 self.compile_container_lit(*kind, elem, elems, *span)
             }
 
-            Expr::MapLit { key, val, entries, span } => {
-                self.compile_map_lit(key, val, entries, *span)
+            Expr::MapLit { kind, key, val, entries, span } => {
+                self.compile_map_lit(*kind, key, val, entries, *span)
             }
 
             Expr::StructLit { name, fields, span } => self.compile_struct_lit(name, fields, *span),
@@ -1346,18 +1351,20 @@ impl Compiler {
 
     fn compile_map_lit(
         &mut self,
+        kind: MapKind,
         key: &TypeExpr,
         val: &TypeExpr,
         entries: &[(Expr, Expr)],
         span: Span,
     ) -> CResult<Type> {
         let ty = self.resolve_type(&TypeExpr::Map(
+            kind,
             Box::new(key.clone()),
             Box::new(val.clone()),
             span,
         ))?;
         let (kt, vt) = match &ty {
-            Type::Map(k, v) => ((**k).clone(), (**v).clone()),
+            Type::Map(_, k, v) => ((**k).clone(), (**v).clone()),
             _ => unreachable!(),
         };
         for (k, v) in entries {
@@ -1366,36 +1373,16 @@ impl Compiler {
             self.expect_type(&vt, &got, v.span(), "in map literal")?;
         }
         self.emit(OP_NEW);
-        self.emit(KIND_MAP);
+        self.emit(map_kind_code(kind));
         // Two stack values per entry: the key, then the value.
         self.emit_u32((entries.len() * 2) as u32);
         Ok(ty)
     }
 
-    /// The builtins a `HashMap<K, V>` answers. Everything positional is a
-    /// compile error that names the spelling which does work.
-    fn compile_map_builtin(
-        &mut self,
-        name: &str,
-        id: u8,
-        args: &[Expr],
-        kt: Type,
-        ct: Type,
-        span: Span,
-    ) -> CResult<Type> {
-        let instead = match id {
-            B_FIND => Some("use `container.contains`"),
-            B_PUSH | B_ADD | B_INSERT => Some("write `m[key] = value`"),
-            B_ERASE => Some("use `container.remove`"),
-            B_POP => Some("a HashMap has no positions"),
-            _ => None,
-        };
-        if let Some(instead) = instead {
-            return Err(CompileError::new(
-                format!("`{}` is not defined for `{}`; {}", name, self.tn(&ct), instead),
-                span,
-            ));
-        }
+    /// The six members of `binz/map`. They read the same for `HashMap` and
+    /// `SortedMap`, which differ in one thing only: the order `map.keys`
+    /// hands back.
+    fn compile_map_form(&mut self, id: u8, args: &[Expr], kt: Type, ct: Type) -> CResult<Type> {
         if id == B_REMOVE || id == B_CONTAINS {
             self.compile_key(&args[1], &kt)?;
         }
@@ -1456,10 +1443,33 @@ impl Compiler {
         }
         let ct = self.compile_expr(&args[0], None)?;
 
-        // `keys` is the one form defined for exactly one container.
-        if id == B_KEYS && !matches!(ct, Type::Map(..)) {
+        // A map is not a container. It is reached only by key, and every
+        // one of its operations lives in `binz/map`, so `binz/container`
+        // hands it back with the line that does work -- the same split that
+        // sends a `str` to `binz/string`.
+        if let Type::Map(_, kt, _) = &ct {
+            if module != "map" {
+                return Err(CompileError::new(
+                    format!(
+                        "`{}` is not defined for `{}`; {}",
+                        name,
+                        self.tn(&ct),
+                        map_instead(member)
+                    ),
+                    span,
+                ));
+            }
+            let kt = (**kt).clone();
+            return self.compile_map_form(id, args, kt, ct.clone());
+        }
+        if module == "map" {
+            let hint = if stdlib::find_form("container", member).is_some() {
+                format!("; a container answers `container.{}`", member)
+            } else {
+                String::new()
+            };
             return Err(CompileError::new(
-                format!("`{}` is only defined for a `HashMap<K, V>`, found `{}`", name, self.tn(&ct)),
+                format!("`{}` needs a map, found `{}`{}", name, self.tn(&ct), hint),
                 span,
             ));
         }
@@ -1477,11 +1487,6 @@ impl Compiler {
                 format!("`{}` needs a container, found `str`{}", name, hint),
                 span,
             ));
-        }
-
-        if let Type::Map(kt, _) = &ct {
-            let kt = (**kt).clone();
-            return self.compile_map_builtin(name, id, args, kt, ct.clone(), span);
         }
 
         let (elem, kind) = match &ct {
@@ -1612,6 +1617,15 @@ impl Compiler {
     }
 
     fn no_member(&self, module: &str, name: &str, span: Span) -> CompileError {
+        // A verb the module refuses on purpose gets the line to write
+        // instead, rather than a pointer at a module that would refuse it
+        // too.
+        if let Some(instead) = stdlib::misused(module, name) {
+            return CompileError::new(
+                format!("`binz/{}` has no `{}`: {}", module, name, instead),
+                span,
+            );
+        }
         let elsewhere: Vec<&str> = stdlib::modules_defining(name)
             .into_iter()
             .filter(|m| *m != module)
@@ -1706,6 +1720,28 @@ impl Compiler {
     }
 }
 
+/// What `binz/container` answers when it is handed a map: every map
+/// operation lives in `binz/map`, so this always names a line that works.
+fn map_instead(member: &str) -> String {
+    match member {
+        "size" | "contains" | "remove" | "clear" | "copy" => {
+            format!("a map answers `map.{}`", member)
+        }
+        "find" => "a map is keyed by value; use `map.contains`".into(),
+        "push" | "add" | "insert" => "write `m[key] = value`".into(),
+        "erase" => "a map has no positions; use `map.remove`".into(),
+        "pop" => "a map has no positions".into(),
+        _ => "every map operation lives in `binz/map`".into(),
+    }
+}
+
+fn map_kind_code(mk: MapKind) -> u8 {
+    match mk {
+        MapKind::Hash => KIND_MAP,
+        MapKind::Sorted => KIND_SORTED_MAP,
+    }
+}
+
 fn kind_code(k: Kind) -> u8 {
     match k {
         Kind::Vector => KIND_VECTOR,
@@ -1746,7 +1782,7 @@ fn stdlib_hint(name: &str, span: Span) -> Option<CompileError> {
     };
     let imports: Vec<String> = mods.iter().map(|m| format!("import binz/{};", m)).collect();
     Some(CompileError::new(
-        format!("{}; write {} after `{}`", was, calls.join(" or "), imports.join(" ")),
+        format!("{}; write {} after `{}`", was, stdlib::join_or(&calls), imports.join(" ")),
         span,
     ))
 }
