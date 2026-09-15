@@ -1,5 +1,5 @@
 use crate::error::{CResult, CompileError};
-use crate::types::Kind;
+use crate::types::{Kind, MapKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
@@ -33,9 +33,9 @@ pub enum Tok {
     /// `Vector` / `LinkedList` / `Set` / `SortedSet`: reserved type names, so
     /// `Vector<i32>` never has to be disambiguated from a comparison.
     Container(Kind),
-    /// `HashMap`: reserved for the same reason, and separate from `Container`
-    /// because it is the one container spelled with two type arguments.
-    Map,
+    /// `HashMap` / `SortedMap`: reserved for the same reason, and separate
+    /// from `Container` because maps are spelled with two type arguments.
+    Map(MapKind),
 
     // punctuation
     LParen,
@@ -95,7 +95,7 @@ pub fn describe(t: &Tok) -> String {
         Tok::True => "true".into(),
         Tok::False => "false".into(),
         Tok::Container(k) => k.name().into(),
-        Tok::Map => "HashMap".into(),
+        Tok::Map(mk) => mk.name().into(),
         Tok::LParen => "(".into(),
         Tok::RParen => ")".into(),
         Tok::LBrace => "{".into(),
@@ -223,10 +223,10 @@ impl Lexer {
                     "cast" => Tok::Cast,
                     "true" => Tok::True,
                     "false" => Tok::False,
-                    "HashMap" => Tok::Map,
-                    _ => match Kind::from_name(&s) {
-                        Some(k) => Tok::Container(k),
-                        None => Tok::Ident(s),
+                    _ => match (Kind::from_name(&s), MapKind::from_name(&s)) {
+                        (Some(k), _) => Tok::Container(k),
+                        (_, Some(mk)) => Tok::Map(mk),
+                        _ => Tok::Ident(s),
                     },
                 }
             } else if c.is_ascii_digit() {

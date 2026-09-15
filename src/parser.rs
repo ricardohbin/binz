@@ -224,10 +224,10 @@ impl Parser {
                 self.expect(Tok::Gt)?;
                 Ok(TypeExpr::Container(k, Box::new(elem), sp))
             }
-            Tok::Map => {
+            Tok::Map(mk) => {
                 self.bump();
                 let (k, v) = self.parse_map_args()?;
-                Ok(TypeExpr::Map(Box::new(k), Box::new(v), sp))
+                Ok(TypeExpr::Map(mk, Box::new(k), Box::new(v), sp))
             }
             Tok::Star => {
                 self.bump();
@@ -511,7 +511,7 @@ impl Parser {
                 self.expect(Tok::RBrace)?;
                 Ok(Expr::ContainerLit { kind, elem, elems, span })
             }
-            Tok::Map => {
+            Tok::Map(kind) => {
                 self.bump();
                 let (key, val) = self.parse_map_args()?;
                 self.expect(Tok::LBrace)?;
@@ -526,7 +526,7 @@ impl Parser {
                     }
                 }
                 self.expect(Tok::RBrace)?;
-                Ok(Expr::MapLit { key, val, entries, span })
+                Ok(Expr::MapLit { kind, key, val, entries, span })
             }
             Tok::Cast => {
                 self.bump();

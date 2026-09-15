@@ -8,8 +8,8 @@ Rust backend, bytecode artifact plus a stack VM that executes it.
 Source files are `.binz`; compiled artifacts are `.binzc`.
 
 This is the v0.1 scratch: primitives, functions as first-class values, C-like
-structs and pointers, fixed arrays, five heap containers, and a standard
-library reached through `import binz/<module>`.
+structs and pointers, fixed arrays, four heap containers, two maps, and a
+standard library reached through `import binz/<module>`.
 
 ## Guiding rule: one way to do one thing
 
@@ -29,12 +29,12 @@ Every design decision below falls out of that rule.
 | Struct literals list every field, in declaration order | one shape per struct |
 | `const` / `var` — no third form | immutable by default in spirit |
 | No `null` | a `*T` always points at something |
-| `c[i]` indexes every container | one spelling for "the element at i", by position for a sequence and by key for a `HashMap` |
-| `m[key] = value` is the only way into a `HashMap` | it inserts when the key is new and overwrites when it is not |
+| `c[i]` indexes every container | one spelling for "the element at i", by position for a sequence and by key for a map |
+| `m[key] = value` is the only way into a map | it inserts when the key is new and overwrites when it is not |
 | Modules are lowercase, members are `camelCase`, types are `PascalCase` | one convention per kind of name, and a test in `src/stdlib.rs` holds the line |
 | A stdlib name is always `module.member` | no bare import, no alias, no wildcard — `io.print` reads the same in every file |
 | The binding is the last path segment, always | `binz/io` is `io`, and there is no way to rename it |
-| `container.size(c)` / `string.size(s)` | one `size` per type family, rather than one name resolving two ways |
+| `container.size(c)` / `string.size(s)` / `map.size(m)` | one `size` per type family, rather than one name resolving three ways |
 | Sequences use `find` / `erase`, sets use `contains` / `remove` | positions and keys are different questions, so they get different verbs |
 | `[T; N]` copies, `Vector<T>` aliases | one rule: frame storage is a value, heap storage is a handle |
 
@@ -45,6 +45,7 @@ cargo build --release
 
 binz run   examples/tour.binz         # compile and execute
 binz run   examples/containers.binz   # the container tour
+binz run   examples/maps.binz         # the map tour
 binz run   examples/stdlib.binz       # the standard library tour
 binz build examples/tour.binz         # emit examples/tour.binzc
 binz exec  examples/tour.binzc        # execute an artifact
@@ -61,8 +62,9 @@ cargo test                            # end-to-end language tests
 Primitives: `i32`, `i64`, `f64`, `bool`, `str`, and `void` (return type only).
 
 Composites: `*T` (pointer), `function(A, B): R` (function), `struct`s,
-`[T; N]` (fixed array), and the heap containers `Vector<T>`, `LinkedList<T>`,
-`Set<T>`, `SortedSet<T>` and `HashMap<K, V>`.
+`[T; N]` (fixed array), the heap containers `Vector<T>`, `LinkedList<T>`,
+`Set<T>` and `SortedSet<T>`, and the maps `HashMap<K, V>` and
+`SortedMap<K, V>`.
 
 ### Variables
 
@@ -142,8 +144,9 @@ var pn: *i64 = &a.y;     // pointers to fields work
 
 ### Containers
 
-Six of them, split by one question: does the storage live in the frame or on
-the heap?
+Five of them, split by one question: does the storage live in the frame or on
+the heap? (The two maps are keyed rather than positional, and get their own
+section [below](#maps).)
 
 | Type | Storage | Assignment | Element type |
 | --- | --- | --- | --- |
@@ -152,7 +155,6 @@ the heap?
 | `LinkedList<T>` | heap, doubly linked nodes | aliases | any one-slot value |
 | `Set<T>` | heap, hashed, insertion order | aliases | `i32` `i64` `f64` `bool` `str` |
 | `SortedSet<T>` | heap, sorted, ascending order | aliases | `i32` `i64` `f64` `bool` `str` |
-| `HashMap<K, V>` | heap, hashed, insertion order | aliases | key: `i32` `i64` `f64` `bool` `str`; value: any one-slot value |
 
 A fixed array is a value like a struct: assigning, passing or returning one
 copies every element, and `&a[i]` is a real pointer into it. A heap container
@@ -172,25 +174,6 @@ v[0] = "ONE";
 
 var seen: Set<i32> = Set<i32>{3, 1, 3};   // two elements
 var ranked: SortedSet<i32> = SortedSet<i32>{40, 10};
-
-var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31};  // key: value
-ages["bruno"] = 27;                       // inserts
-ages["ana"] = 32;                         // overwrites
-```
-
-`HashMap<K, V>` is the one type with two arguments, and the one container
-subscripted by something other than an `i32`. Reading a key that is not there
-traps — binZ has no `null`, so `container.contains(m, k)` is the guard.
-Walking a map is `container.keys(m)`, which hands back a `Vector<K>` in
-insertion order; there is no `values`, because `m[k]` already answers that:
-
-```c
-const who: Vector<str> = container.keys(ages);
-var i: i32 = 0;
-while (i < container.size(who)) {
-    io.print(who[i] + " = " + cast<str>(ages[who[i]]));
-    i = i + 1;
-}
 ```
 
 A heap container may sit in a struct field or an array element, where it is
@@ -198,9 +181,8 @@ still just a handle: copying the struct shares the container. For the same
 reason `[Vector<i32>{}; 2]` repeats *one* handle into both slots — write the
 elements out to get two containers.
 
-`c[i]` reads an element of any of the six; it is assignable on the three
-sequences and on a `HashMap`, and rejected on a set, whose elements are its
-keys. An index is
+`c[i]` reads an element of any of the five; it is assignable on the three
+sequences and rejected on a set, whose elements are its keys. An index is
 always an `i32`. Iteration is a `while` over `container.size`, and it is
 deterministic everywhere — a `Set` keeps insertion order, a `SortedSet` stays
 ascending:
@@ -224,11 +206,10 @@ The verbs live in `binz/container`, and each one belongs to exactly one shape:
 | `container.insert(c, i, x)` | `Vector`, `LinkedList` | `void` |
 | `container.erase(c, i)` | `Vector`, `LinkedList` | the removed element |
 | `container.add(s, x)` | `Set`, `SortedSet` | `true` if it was new |
-| `container.remove(s, x)` | `Set`, `SortedSet`, `HashMap` | `true` if it was there |
-| `container.contains(s, x)` | `Set`, `SortedSet`, `HashMap` | `bool` |
-| `container.keys(m)` | `HashMap` | a `Vector<K>`, in insertion order |
-| `container.clear(c)` | the five heap containers | `void` |
-| `container.copy(c)` | the five heap containers | a deep copy |
+| `container.remove(s, x)` | `Set`, `SortedSet` | `true` if it was there |
+| `container.contains(s, x)` | `Set`, `SortedSet` | `bool` |
+| `container.clear(c)` | the four heap containers | `void` |
+| `container.copy(c)` | the four heap containers | a deep copy |
 
 `erase` takes a position and `remove` takes a key, so there is never a choice
 about which one a container wants. Applying the wrong one says so:
@@ -238,15 +219,85 @@ error: `container.push` is not defined for `Set<i32>`; use `container.add`
 error: `container.contains` is not defined for `Vector<i32>`; use `container.find`
 error: `container.push` is not defined for `[i32; 1]`; a fixed array never changes size, use `Vector<i32>`
 error: `container.add` is not defined for `HashMap<str, i32>`; write `m[key] = value`
+error: `container.size` is not defined for `HashMap<str, i32>`; a map answers `map.size`
 error: `container.size` needs a container, found `str`; a `str` answers `string.size`
 ```
 
-A `str` is not a container: it is sized and searched through `binz/string`, so
-`size`, `find` and `contains` each mean one thing per type instead of one name
-covering two.
+A `str` is not a container, and neither is a map: a `str` is sized and searched
+through `binz/string`, a map through `binz/map`. So `size`, `find` and
+`contains` each mean one thing per type family instead of one name covering
+three.
 
-Out-of-range indexes, a `HashMap` key that is not present, `pop` on an empty
-container and NaN used as a key all trap at runtime.
+Out-of-range indexes, `pop` on an empty container and NaN used as a key all
+trap at runtime.
+
+### Maps
+
+Two of them. Both are keyed by value, both are handles, and both answer the
+same six verbs in `binz/map` — they differ in one thing, the order
+`map.keys` hands back:
+
+| Type | Storage | `map.keys` order | Cost |
+| --- | --- | --- | --- |
+| `HashMap<K, V>` | heap, hash index over an insertion-ordered vector | insertion | read and insert `O(1)`; `map.remove` is `O(n)` |
+| `SortedMap<K, V>` | heap, red-black tree | ascending by key | `O(log n)`, including `map.remove` |
+
+A `HashMap` pays for its insertion order: the hash index stores *positions*
+into a vector, so erasing a key has to close the gap and reindex everything
+after it. If a workload removes keys in bulk, `SortedMap` is the faster of
+the two today, despite the `O(log n)`.
+
+A key is `i32`, `i64`, `f64`, `bool` or `str`; a value is any one-slot value.
+These are the only two types with two type arguments, and the only two
+subscripted by something other than an `i32`.
+
+```c
+var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31};  // key: value
+ages["bruno"] = 27;                       // inserts
+ages["ana"] = 32;                         // overwrites
+
+var stock: SortedMap<str, i32> = SortedMap<str, i32>{"pear": 3, "apple": 12};
+stock["fig"] = 7;                         // same spelling, ordered storage
+```
+
+`m[key] = value` is the only way in, so there is no `add` / `insert` / `put`
+to choose between. Reading a key that is not there traps — binZ has no
+`null`, so `map.contains(m, k)` is the guard. Walking a map is `map.keys(m)`,
+which hands back a `Vector<K>`; there is deliberately no `values`, because
+`m[k]` already answers that:
+
+```c
+const who: Vector<str> = map.keys(ages);
+var i: i32 = 0;
+while (i < container.size(who)) {       // the Vector is a container again
+    io.print(who[i] + " = " + cast<str>(ages[who[i]]));
+    i = i + 1;
+}
+```
+
+| Call | Result |
+| --- | --- |
+| `map.size(m)` | `i32` |
+| `map.contains(m, k)` | `bool` |
+| `map.remove(m, k)` | `true` if the key was there |
+| `map.keys(m)` | a `Vector<K>` |
+| `map.clear(m)` | `void` |
+| `map.copy(m)` | a deep copy |
+
+A map answers `remove` and never `erase`, the same split the sets use: `erase`
+takes a position and a map has none. Every other verb names the line that
+works:
+
+```
+error: `binz/map` has no `add`: write `m[key] = value`
+error: `binz/map` has no `find`: a map is keyed by value; use `map.contains`
+error: `binz/map` has no `values`: read `m[key]` while walking `map.keys(m)`
+error: `map.size` needs a map, found `Vector<i32>`; a container answers `container.size`
+```
+
+Reading an absent key traps, and so does NaN used as a key — a `SortedMap`
+has to compare its keys, so it rejects NaN for exactly the reason a
+`SortedSet` does.
 
 ### Operators
 
@@ -313,7 +364,8 @@ name away from the program — `add` and `find` are ordinary words, and
 | `binz/string` | `size` `at` `slice` `find` `contains` `startsWith` `endsWith` `upper` `lower` `trim` `repeat` `replace` `split` `join` |
 | `binz/int` | `parse` `canParse` `abs` `min` `max` |
 | `binz/float` | `parse` `canParse` `abs` `min` `max` `floor` `ceil` `round` `sqrt` `pow` `isNan` |
-| `binz/container` | the twelve container verbs, [above](#containers) |
+| `binz/container` | the eleven container verbs, [above](#containers) |
+| `binz/map` | the six map verbs, [above](#maps) |
 
 ### Which members are values
 
@@ -328,9 +380,9 @@ const n:     function(str): i32  = container.size;
 // cannot write in a signature, so it is not a value; call it directly
 ```
 
-`container.size` answers for six different types and `int.max` for two, and
-binZ has no user-written generics yet, so those have no type to hold. They are
-resolved at the call site instead.
+`container.size` answers for five different types, `map.keys` for two and
+`int.max` for two, and binZ has no user-written generics yet, so those have no
+type to hold. They are resolved at the call site instead.
 
 ### binz/string
 
@@ -388,15 +440,20 @@ Every diagnostic carries the line the program should have written:
 error: `print` is in `binz/io`; write `io.print` after `import binz/io;`
 error: `io` is not imported; add `import binz/io;` at the top of the file
 error: `binz/string` has no `push`; it is in `binz/container`
-error: there is no module `binz/json`; binZ has io, string, int, float, container
+error: `binz/map` has no `values`: read `m[key]` while walking `map.keys(m)`
+error: there is no module `binz/json`; binZ has io, string, int, float, container, map
 ```
+
+A verb a module refuses on purpose gets the line to write instead, rather
+than a pointer at another module that would refuse it too.
 
 `len` was the spelling before the standard library had modules, so it gets its
 own:
 
 ```
-error: `len` is now `size`, in `binz/string` or `binz/container`; write
-`string.size` or `container.size` after `import binz/string; import binz/container;`
+error: `len` is now `size`, in `binz/string`, `binz/container` or `binz/map`;
+write `string.size`, `container.size` or `map.size` after
+`import binz/string; import binz/container; import binz/map;`
 ```
 
 ## Implementation
@@ -408,7 +465,7 @@ src/compiler.rs   AST -> type check + bytecode, in a single pass
 src/stdlib.rs     the module table: what binz/io, binz/string, ... contain
 src/bytecode.rs   instruction set, .binzc serialization, disassembler
 src/vm.rs         stack VM
-src/obj.rs        heap containers behind Vector / LinkedList / Set / SortedSet / HashMap
+src/obj.rs        heap storage: Vector / LinkedList / Set / SortedSet / HashMap / SortedMap
 ```
 
 The compiler is one pass: because binZ has no inference beyond literal typing,
@@ -437,12 +494,21 @@ arena, and `l[i]` walks from whichever end is closer — indexing a list is
 O(n), and that is the honest cost. `Set<T>` is a hash index over an
 insertion-ordered vector; `SortedSet<T>` is a sorted vector searched by
 bisection; `HashMap<K, V>` is the same shape as `Set<T>`, a hash index over an
-insertion-ordered vector of pairs, which is what makes `container.keys(m)` deterministic
-across runs. `get` and `set` share the `c[i]` opcodes: the VM reads the value
-on the stack as a position for a sequence and as a key for a map.
+insertion-ordered vector of pairs; and `SortedMap<K, V>` is a genuine
+red-black tree over a node arena, with `-1` for nil rather than a sentinel
+node, so deletion carries the parent explicitly where CLRS reads
+`nil.parent`. Both maps therefore make `map.keys(m)` deterministic across
+runs. `get` and `set` share the `c[i]` opcodes: the VM reads the value on the
+stack as a position for a sequence and as a key for a map.
+
+The red-black invariants are checked directly rather than trusted: the unit
+tests in `src/obj.rs` walk the tree after every step of 3000 randomised
+inserts and deletes, asserting the root is black, no red node has a red
+child, every path carries the same black height, parent links agree, and the
+in-order walk is ascending — against a plain `Vec` kept as the oracle.
 
 Runtime traps: division/remainder by zero, integer overflow, an index out of
-range, a `HashMap` key that is not present, `pop` on an empty container, NaN
+range, a map key that is not present, `pop` on an empty container, NaN
 used as a key, and dereferencing a pointer into a frame that has already been
 popped.
 
@@ -454,7 +520,7 @@ parameter slot sizes, frame size, sret flag, code), entry index.
 ## Not in v0.1
 
 Slices, user-written generics, closures, user-defined modules (`import` reaches
-`binz/*` only), methods, enums/unions, an ordered map, bitwise operators, and
+`binz/*` only), methods, enums/unions, bitwise operators, and
 unsigned integers. The standard library is a scratch: no file or process I/O
 beyond `io.print`, no time, no random. `cast<str>` formats scalars only, so a
 container is printed by iterating it. Heap containers cannot hold structs, and their elements have no

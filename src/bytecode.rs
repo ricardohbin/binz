@@ -4,7 +4,7 @@
 //!   magic "BINZ" | version u32 | strings | functions | entry u32
 
 pub const MAGIC: &[u8; 4] = b"BINZ";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 pub const OP_PUSH_I32: u8 = 0x01;
 pub const OP_PUSH_I64: u8 = 0x02;
@@ -55,7 +55,7 @@ pub const OP_RET: u8 = 0x51;
 pub const OP_CAST: u8 = 0x60;
 
 /// `[kind: u8, count: u32]` -- pops `count` values, pushes a new container.
-/// A `HashMap` pushes two values per entry, so `count` is twice its length.
+/// A map pushes two values per entry, so `count` is twice its length.
 pub const OP_NEW: u8 = 0x70;
 /// Pops an index and a container, pushes the element.
 pub const OP_GET: u8 = 0x71;
@@ -69,6 +69,7 @@ pub const KIND_LIST: u8 = 1;
 pub const KIND_SET: u8 = 2;
 pub const KIND_SORTED_SET: u8 = 3;
 pub const KIND_MAP: u8 = 4;
+pub const KIND_SORTED_MAP: u8 = 5;
 
 pub const B_SIZE: u8 = 0;
 pub const B_FIND: u8 = 1;
@@ -347,7 +348,8 @@ pub fn disassemble(m: &Module) -> String {
                         KIND_LIST => "LinkedList",
                         KIND_SET => "Set",
                         KIND_SORTED_SET => "SortedSet",
-                        _ => "HashMap",
+                        KIND_MAP => "HashMap",
+                        _ => "SortedMap",
                     };
                     format!("new {} {}", name, count)
                 }

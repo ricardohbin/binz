@@ -39,6 +39,34 @@ impl Kind {
     }
 }
 
+/// The two maps. Both are spelled `Name<K, V>`, both are reached only by
+/// key, and both answer `binz/map` -- they differ in one thing, the order
+/// `map.keys` hands back, exactly as `Set` and `SortedSet` do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapKind {
+    /// `HashMap<K, V>`: insertion order.
+    Hash,
+    /// `SortedMap<K, V>`: ascending key order, held in a red-black tree.
+    Sorted,
+}
+
+impl MapKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            MapKind::Hash => "HashMap",
+            MapKind::Sorted => "SortedMap",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<MapKind> {
+        Some(match s {
+            "HashMap" => MapKind::Hash,
+            "SortedMap" => MapKind::Sorted,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     I32,
@@ -54,10 +82,10 @@ pub enum Type {
     Array(Box<Type>, u32),
     /// `Vector<T>` and friends: a handle to heap storage.
     Container(Kind, Box<Type>),
-    /// `HashMap<K, V>`: a handle to heap storage keyed by value. It is the
-    /// one container with two type arguments, so it is its own variant
-    /// rather than a `Kind`.
-    Map(Box<Type>, Box<Type>),
+    /// `HashMap<K, V>` and `SortedMap<K, V>`: a handle to heap storage
+    /// keyed by value. Maps are their own variant rather than a `Kind`
+    /// because they are the only types with two type arguments.
+    Map(MapKind, Box<Type>, Box<Type>),
 }
 
 impl Type {
@@ -81,8 +109,8 @@ impl Type {
         !self.is_aggregate() && *self != Type::Void
     }
 
-    /// Types a `Set` or a `HashMap` can key on: everything with a total,
-    /// printable identity.
+    /// Types a set or a map can key on: everything with a total, printable
+    /// identity.
     pub fn is_key(&self) -> bool {
         matches!(self, Type::I32 | Type::I64 | Type::F64 | Type::Bool | Type::Str)
     }
@@ -121,6 +149,8 @@ pub fn type_name(t: &Type, structs: &[StructInfo]) -> String {
         Type::Struct(id) => structs[*id].name.clone(),
         Type::Array(elem, n) => format!("[{}; {}]", type_name(elem, structs), n),
         Type::Container(k, elem) => format!("{}<{}>", k.name(), type_name(elem, structs)),
-        Type::Map(k, v) => format!("HashMap<{}, {}>", type_name(k, structs), type_name(v, structs)),
+        Type::Map(mk, k, v) => {
+            format!("{}<{}, {}>", mk.name(), type_name(k, structs), type_name(v, structs))
+        }
     }
 }

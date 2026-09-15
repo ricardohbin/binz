@@ -1,0 +1,87 @@
+// Maps: two of them, keyed by value rather than by position. Both answer the
+// same six verbs in `binz/map`, and they differ in exactly one thing -- the
+// order `map.keys` hands back. A map is not a container, so `container.size(m)`
+// is an error that names `map.size`.
+
+import binz/io;
+import binz/string;
+import binz/container;
+import binz/map;
+
+function line(label: str, text: str): void {
+    io.print(label + ": " + text);
+    return;
+}
+
+// binZ has no user generics yet, so a walker is written per map type. The two
+// bodies are identical, which is the honest cost of not having generics.
+function showHash(m: HashMap<str, i32>): str {
+    const ks: Vector<str> = map.keys(m);
+    var out: Vector<str> = Vector<str>{};
+    var i: i32 = 0;
+    while (i < container.size(ks)) {
+        container.push(out, ks[i] + "=" + cast<str>(m[ks[i]]));
+        i = i + 1;
+    }
+    return string.join(out, ", ");
+}
+
+function showSorted(m: SortedMap<str, i32>): str {
+    const ks: Vector<str> = map.keys(m);
+    var out: Vector<str> = Vector<str>{};
+    var i: i32 = 0;
+    while (i < container.size(ks)) {
+        container.push(out, ks[i] + "=" + cast<str>(m[ks[i]]));
+        i = i + 1;
+    }
+    return string.join(out, ", ");
+}
+
+function main(): i32 {
+    io.print("-- binZ maps --");
+
+    // ------------------------------- HashMap<K, V>, keyed by value, one way in
+    // `m[key] = value` inserts when the key is new and overwrites when it is
+    // not, so it is the only way to put an entry in: no add, insert or put.
+    var ages: HashMap<str, i32> = HashMap<str, i32>{"ana": 31, "bruno": 27};
+    ages["carla"] = 45;
+    ages["ana"] = 32;
+    line("ana", cast<str>(ages["ana"]));
+    line("size", cast<str>(map.size(ages)));
+    line("has bruno", cast<str>(map.contains(ages, "bruno")));
+    line("dropped bruno", cast<str>(map.remove(ages, "bruno")));
+
+    // `map.keys` hands back a Vector -- that is how a map is walked, since
+    // `m[k]` already answers the value and there is deliberately no `values`.
+    // A HashMap answers in insertion order.
+    line("ages", showHash(ages));
+
+    // Reading a key that is not there traps: binZ has no `null`, so
+    // `map.contains` is the guard that goes in front of `m[k]`.
+    line("has zed", cast<str>(map.contains(ages, "zed")));
+
+    // ------------------------------- SortedMap<K, V>, the same map in key order
+    // A red-black tree rather than a hash table, so `map.keys` answers
+    // ascending. That ordering is the only difference: every verb below is the
+    // same one the HashMap just used.
+    var stock: SortedMap<str, i32> = SortedMap<str, i32>{"pear": 3, "apple": 12};
+    stock["fig"] = 7;
+    stock["apple"] = 20;
+    line("sorted stock", showSorted(stock));
+    line("dropped fig", cast<str>(map.remove(stock, "fig")));
+    line("after drop", showSorted(stock));
+
+    // ----------------------------------- a map is a handle, like any container
+    // `const` freezes the handle, not the contents, so `frozen` can still take
+    // an entry -- and it writes straight through to `stock`. `map.copy` is the
+    // one way to get independent storage, and it is deep.
+    const frozen: SortedMap<str, i32> = stock;
+    var snapshot: SortedMap<str, i32> = map.copy(stock);
+    frozen["plum"] = 5;
+    line("through the alias", showSorted(stock));
+    line("snapshot", showSorted(snapshot));
+
+    map.clear(stock);
+    line("cleared / snapshot", cast<str>(map.size(stock)) + " / " + cast<str>(map.size(snapshot)));
+    return 0;
+}
