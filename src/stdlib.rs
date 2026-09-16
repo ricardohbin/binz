@@ -3,9 +3,10 @@
 //!
 //! A module is made visible with `import binz/<name>;` and every one of its
 //! members is then reached as `<name>.<member>`. That is the only spelling:
-//! no bare import, no alias, no wildcard, and no implicitly-visible name.
-//! The last path segment is always the binding, so a reader never has to
-//! look up where `print` came from.
+//! no bare import, no wildcard, and no implicitly-visible name. The last path
+//! segment is always the binding, so a reader never has to look up where
+//! `print` came from -- and since no two standard library modules are named
+//! the same, `as` is never legal on one of these imports.
 //!
 //! Each module splits into two tables, for one reason only:
 //!
@@ -202,10 +203,19 @@ pub fn renamed_to(name: &str) -> Option<&'static str> {
 /// "a", "a or b", "a, b or c" -- so a diagnostic listing three modules reads
 /// as a sentence rather than as a chain of `or`s.
 pub fn join_or(items: &[String]) -> String {
+    join_with(items, "or")
+}
+
+/// The same, for a list of things that are all true at once.
+pub fn join_and(items: &[String]) -> String {
+    join_with(items, "and")
+}
+
+fn join_with(items: &[String], conj: &str) -> String {
     match items.len() {
         0 => String::new(),
         1 => items[0].clone(),
-        n => format!("{} or {}", items[..n - 1].join(", "), items[n - 1]),
+        n => format!("{} {} {}", items[..n - 1].join(", "), conj, items[n - 1]),
     }
 }
 

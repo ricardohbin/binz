@@ -8,6 +8,7 @@ use crate::ast::*;
 use crate::bytecode::*;
 use crate::error::{CResult, CompileError};
 use crate::lexer::Span;
+use crate::loader::{Program, SourceFile};
 use crate::types::*;
 use crate::stdlib;
 
@@ -32,13 +33,37 @@ struct FnSig {
     span: Span,
 }
 
-pub struct Compiler {
-    /// Modules made visible by an `import`, by their binding name.
-    imports: Vec<String>,
-    structs: Vec<StructInfo>,
+/// What one file can see. Names are per file: `math.binz` and `main.binz`
+/// may both define `add`, and an `import` is visible only in the file that
+/// writes it. Only the *ids* are shared -- a struct id and a function id
+/// index the whole program, because they are what the bytecode holds.
+#[derive(Default)]
+struct FileScope {
+    /// `binz/<name>` modules imported here, by binding.
+    std_imports: Vec<String>,
+    /// `@root/...` modules imported here, as `(binding, file index)`.
+    mod_imports: Vec<(String, usize)>,
     struct_ids: HashMap<String, usize>,
-    sigs: Vec<FnSig>,
     fn_ids: HashMap<String, usize>,
+}
+
+/// A qualified name's left-hand side: `io` in `io.print`, `math` in
+/// `math.add`.
+enum ModRef {
+    Std(String),
+    /// Index into `Compiler::files`.
+    Local(usize),
+}
+
+pub struct Compiler {
+    /// One scope per file of the program, indexed as `Program::files`.
+    files: Vec<FileScope>,
+    /// The `@root/...` spelling of each file, for diagnostics.
+    displays: Vec<String>,
+    /// The file being compiled right now.
+    cur: usize,
+    structs: Vec<StructInfo>,
+    sigs: Vec<FnSig>,
     strings: Vec<String>,
     string_ids: HashMap<String, u32>,
 
@@ -51,13 +76,13 @@ pub struct Compiler {
     cur_sret: bool,
 }
 
-pub fn compile(items: &[Item]) -> CResult<Module> {
+pub fn compile(prog: &Program) -> CResult<Module> {
     let mut c = Compiler {
-        imports: Vec::new(),
+        files: prog.files.iter().map(|_| FileScope::default()).collect(),
+        displays: prog.files.iter().map(|f| f.display.clone()).collect(),
+        cur: prog.entry,
         structs: Vec::new(),
-        struct_ids: HashMap::new(),
         sigs: Vec::new(),
-        fn_ids: HashMap::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
         code: Vec::new(),
@@ -67,26 +92,163 @@ pub fn compile(items: &[Item]) -> CResult<Module> {
         cur_ret: Type::Void,
         cur_sret: false,
     };
-    c.run(items)
+    c.run(prog)
 }
 
 impl Compiler {
-    fn run(&mut self, items: &[Item]) -> CResult<Module> {
-        // 0. imports. A module is bound to the last segment of its path and
-        // to nothing else, so `binz/io` is always reached as `io.`.
-        for item in items {
-            if let Item::Import(im) = item {
+    fn run(&mut self, prog: &Program) -> CResult<Module> {
+        // Every phase runs over every file before the next one begins, so a
+        // module and the file importing it are indistinguishable: either may
+        // be written first, and neither has to be compiled twice.
+        self.each_file(prog, Self::declare_imports)?;
+        self.each_file(prog, Self::declare_structs)?;
+        self.each_file(prog, Self::declare_fields)?;
+        self.each_file(prog, Self::lay_out_structs)?;
+        self.each_file(prog, Self::declare_fns)?;
+
+        // `main` is the program, so it belongs to the entry file and to no
+        // other. A module that grew one is almost certainly a file that was
+        // meant to be run.
+        for (i, f) in prog.files.iter().enumerate() {
+            if i == prog.entry {
+                continue;
+            }
+            if let Some(fd) = fn_named(f, "main") {
+                return Err(CompileError::new(
+                    format!(
+                        "`{}` defines `main`, but only the file passed to `binz` does; \
+                         an imported module is a library",
+                        f.display
+                    ),
+                    fd.span,
+                )
+                .at_file(&f.path));
+            }
+        }
+
+        let entry = match self.files[prog.entry].fn_ids.get("main") {
+            Some(i) => *i,
+            None => {
+                return Err(CompileError::new(
+                    "every program needs `function main(): i32`",
+                    Span { line: 1, col: 1 },
+                )
+                .at_file(&prog.files[prog.entry].path))
+            }
+        };
+        {
+            let m = &self.sigs[entry];
+            if !m.params.is_empty() || m.ret != Type::I32 {
+                return Err(CompileError::new(
+                    "`main` must be declared `function main(): i32`",
+                    m.span,
+                )
+                .at_file(&prog.files[prog.entry].path));
+            }
+        }
+
+        // Bodies last, so any file may call into any file it imported.
+        // `funcs` is indexed by function id rather than appended to, because
+        // the ids were handed out per file in `declare_fns`.
+        let mut funcs: Vec<Option<FnMeta>> = (0..self.sigs.len()).map(|_| None).collect();
+        for (i, f) in prog.files.iter().enumerate() {
+            self.cur = i;
+            for item in &f.items {
+                if let Item::Fn(fd) = item {
+                    let idx = self.files[i].fn_ids[&fd.name];
+                    funcs[idx] = Some(self.compile_fn(fd, idx).map_err(|e| e.at_file(&f.path))?);
+                }
+            }
+        }
+
+        Ok(Module {
+            strings: std::mem::take(&mut self.strings),
+            funcs: funcs.into_iter().map(|f| f.expect("every signature got a body")).collect(),
+            entry: entry as u32,
+        })
+    }
+
+    /// Run one phase over every file, with `cur` set and every diagnostic
+    /// labelled with the file it came from.
+    fn each_file(
+        &mut self,
+        prog: &Program,
+        phase: fn(&mut Self, &SourceFile) -> CResult<()>,
+    ) -> CResult<()> {
+        for (i, f) in prog.files.iter().enumerate() {
+            self.cur = i;
+            phase(self, f).map_err(|e| e.at_file(&f.path))?;
+        }
+        Ok(())
+    }
+
+    // 0. imports. A module is bound to the last segment of its path and to
+    // nothing else, so `binz/io` is always reached as `io.` and
+    // `@root/utils/math.binz` as `math.`.
+    fn declare_imports(&mut self, f: &SourceFile) -> CResult<()> {
+        // Two directories may hold two files of the same name. Find those
+        // names first: they are the only place `as` is legal, and the only
+        // place it is required.
+        let contested = contested_names(f);
+
+        // `deps` holds one file index per local import, in source order.
+        let mut dep = 0;
+        for item in &f.items {
+            let im = match item {
+                Item::Import(im) => im,
+                _ => continue,
+            };
+            let name = im.binding().to_string();
+            if im.local {
+                let target = f.deps[dep];
+                dep += 1;
+                if self.files[self.cur].mod_imports.iter().any(|(_, t)| *t == target) {
+                    return Err(CompileError::new(
+                        format!("`{}` is already imported in this file", im.text()),
+                        im.span,
+                    ));
+                }
+                self.check_rename(im, &contested)?;
+                // Only the file's own name can collide with the standard
+                // library: a rename always carries a capital at the join, so
+                // it can never be a lowercase module name.
+                if stdlib::is_module(im.own_name()) {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is the standard library module `binz/{}`; a local module \
+                             cannot take its name",
+                            im.own_name(),
+                            im.own_name()
+                        ),
+                        im.span,
+                    ));
+                }
+                self.check_unbound(&name, im.span)?;
+                self.files[self.cur].mod_imports.push((name, target));
+            } else {
+                if let Some(a) = &im.alias {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is always reached as `{}`; `as` renames a module only when \
+                             two or more imports in a file are named the same, and no two \
+                             standard library modules are",
+                            im.text(),
+                            im.own_name()
+                        ),
+                        a.span,
+                    ));
+                }
                 if im.path.len() != 2 || im.path[0] != "binz" {
                     return Err(CompileError::new(
                         format!(
-                            "`{}` is not a module path; every module is spelled `binz/<name>` ({})",
+                            "`{}` is not a module path; a standard library module is spelled \
+                             `binz/<name>` ({}), and a file of this project `@root/<path>.binz`",
                             im.text(),
                             stdlib::MODULES.join(", ")
                         ),
                         im.span,
                     ));
                 }
-                let name = im.binding().to_string();
                 if !stdlib::is_module(&name) {
                     return Err(CompileError::new(
                         format!(
@@ -97,27 +259,97 @@ impl Compiler {
                         im.span,
                     ));
                 }
-                if self.imports.contains(&name) {
-                    return Err(CompileError::new(
-                        format!("`binz/{}` is already imported", name),
-                        im.span,
-                    ));
-                }
-                self.imports.push(name);
+                self.check_unbound(&name, im.span)?;
+                self.files[self.cur].std_imports.push(name);
             }
         }
+        Ok(())
+    }
 
-        // 1. struct names
-        for item in items {
+    /// `as` exists for exactly one situation: this file imports two or more
+    /// modules that are named the same. Then **every one of them** is
+    /// renamed, so a name is never the default for one import and a rename
+    /// for another -- and outside that situation `as` is an error, because a
+    /// module would otherwise have two spellings.
+    ///
+    /// The rename itself is not a choice either: it is the directory and the
+    /// file name joined, so two people renaming the same clash write the same
+    /// line.
+    fn check_rename(
+        &self,
+        im: &ImportDef,
+        contested: &[(String, Vec<String>)],
+    ) -> CResult<()> {
+        let clash = contested.iter().find(|(n, _)| n == im.own_name());
+        match (&im.alias, clash) {
+            (None, None) => Ok(()),
+            (None, Some((name, files))) => Err(CompileError::new(
+                format!(
+                    "{} are named `{}`; when two or more imports in a file are named the \
+                     same, every one of them is renamed -- write `import {} as {};`",
+                    stdlib::join_and(files),
+                    name,
+                    im.text(),
+                    derived_alias(im)
+                ),
+                im.span,
+            )),
+            (Some(a), None) => Err(CompileError::new(
+                format!(
+                    "`as` renames a module only when two or more imports in a file are named \
+                     the same; `{}` is the only `{}` in this file, so it is imported as `{}`",
+                    im.text(),
+                    im.own_name(),
+                    im.own_name()
+                ),
+                a.span,
+            )),
+            (Some(a), Some(_)) => {
+                let want = derived_alias(im);
+                if a.name != want {
+                    return Err(CompileError::new(
+                        format!(
+                            "the rename of `{}` is `{}`, not `{}`: a rename is the directory \
+                             and the file name joined, so it is not a choice either",
+                            im.text(),
+                            want,
+                            a.name
+                        ),
+                        a.span,
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// One binding per name per file, whichever kind of import claimed it.
+    fn check_unbound(&self, name: &str, span: Span) -> CResult<()> {
+        let sc = &self.files[self.cur];
+        let taken = sc.std_imports.iter().any(|m| m == name)
+            || sc.mod_imports.iter().any(|(b, _)| b == name);
+        if taken {
+            return Err(CompileError::new(
+                format!("`{}` is already imported in this file", name),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    // 1. struct names
+    fn declare_structs(&mut self, f: &SourceFile) -> CResult<()> {
+        for item in &f.items {
             if let Item::Struct(sd) = item {
                 self.check_free(&sd.name, sd.span, "the name of a struct")?;
-                if self.struct_ids.contains_key(&sd.name) {
+                if self.files[self.cur].struct_ids.contains_key(&sd.name) {
                     return Err(CompileError::new(
                         format!("struct `{}` is already defined", sd.name),
                         sd.span,
                     ));
                 }
-                self.struct_ids.insert(sd.name.clone(), self.structs.len());
+                let id = self.structs.len();
+                self.files[self.cur].struct_ids.insert(sd.name.clone(), id);
                 self.structs.push(StructInfo {
                     name: sd.name.clone(),
                     fields: Vec::new(),
@@ -126,48 +358,60 @@ impl Compiler {
                 });
             }
         }
+        Ok(())
+    }
 
-        // 2. field types
-        for item in items {
+    // 2. field types
+    fn declare_fields(&mut self, f: &SourceFile) -> CResult<()> {
+        for item in &f.items {
             if let Item::Struct(sd) = item {
-                let id = self.struct_ids[&sd.name];
+                let id = self.files[self.cur].struct_ids[&sd.name];
                 let mut fields = Vec::new();
-                for f in &sd.fields {
-                    if fields.iter().any(|x: &FieldInfo| x.name == f.name) {
+                for fl in &sd.fields {
+                    if fields.iter().any(|x: &FieldInfo| x.name == fl.name) {
                         return Err(CompileError::new(
-                            format!("duplicate field `{}` in struct `{}`", f.name, sd.name),
-                            f.span,
+                            format!("duplicate field `{}` in struct `{}`", fl.name, sd.name),
+                            fl.span,
                         ));
                     }
-                    let ty = self.resolve_type(&f.ty)?;
+                    let ty = self.resolve_type(&fl.ty)?;
                     if ty == Type::Void {
-                        return Err(CompileError::new("a field cannot have type `void`", f.ty.span()));
+                        return Err(CompileError::new(
+                            "a field cannot have type `void`",
+                            fl.ty.span(),
+                        ));
                     }
-                    fields.push(FieldInfo { name: f.name.clone(), ty, offset: 0 });
+                    fields.push(FieldInfo { name: fl.name.clone(), ty, offset: 0 });
                 }
                 self.structs[id].fields = fields;
             }
         }
+        Ok(())
+    }
 
-        // 3. layouts (detects value-recursive structs)
-        for item in items {
+    // 3. layouts (detects value-recursive structs)
+    fn lay_out_structs(&mut self, f: &SourceFile) -> CResult<()> {
+        for item in &f.items {
             if let Item::Struct(sd) = item {
-                let id = self.struct_ids[&sd.name];
+                let id = self.files[self.cur].struct_ids[&sd.name];
                 self.layout(id, sd.span, &mut vec![false; self.structs.len()])?;
             }
         }
+        Ok(())
+    }
 
-        // 4. function signatures
-        for item in items {
+    // 4. function signatures
+    fn declare_fns(&mut self, f: &SourceFile) -> CResult<()> {
+        for item in &f.items {
             if let Item::Fn(fd) = item {
                 self.check_free(&fd.name, fd.span, "the name of a function")?;
-                if self.fn_ids.contains_key(&fd.name) {
+                if self.files[self.cur].fn_ids.contains_key(&fd.name) {
                     return Err(CompileError::new(
                         format!("function `{}` is already defined", fd.name),
                         fd.span,
                     ));
                 }
-                if self.struct_ids.contains_key(&fd.name) {
+                if self.files[self.cur].struct_ids.contains_key(&fd.name) {
                     return Err(CompileError::new(
                         format!("`{}` is already the name of a struct", fd.name),
                         fd.span,
@@ -185,37 +429,12 @@ impl Compiler {
                     params.push(ty);
                 }
                 let ret = self.resolve_type(&fd.ret)?;
-                self.fn_ids.insert(fd.name.clone(), self.sigs.len());
+                let id = self.sigs.len();
+                self.files[self.cur].fn_ids.insert(fd.name.clone(), id);
                 self.sigs.push(FnSig { name: fd.name.clone(), params, ret, span: fd.span });
             }
         }
-
-        let entry = match self.fn_ids.get("main") {
-            Some(i) => *i,
-            None => {
-                return Err(CompileError::new(
-                    "every program needs `function main(): i32`",
-                    Span { line: 1, col: 1 },
-                ))
-            }
-        };
-        {
-            let m = &self.sigs[entry];
-            if !m.params.is_empty() || m.ret != Type::I32 {
-                return Err(CompileError::new("`main` must be declared `function main(): i32`", m.span));
-            }
-        }
-
-        // 5. bodies
-        let mut funcs = Vec::new();
-        for item in items {
-            if let Item::Fn(fd) = item {
-                let idx = self.fn_ids[&fd.name];
-                funcs.push(self.compile_fn(fd, idx)?);
-            }
-        }
-
-        Ok(Module { strings: std::mem::take(&mut self.strings), funcs, entry: entry as u32 })
+        Ok(())
     }
 
     // ------------------------------------------------------------- types
@@ -229,7 +448,7 @@ impl Compiler {
                 "bool" => Type::Bool,
                 "str" => Type::Str,
                 "void" => Type::Void,
-                other => match self.struct_ids.get(other) {
+                other => match self.files[self.cur].struct_ids.get(other) {
                     Some(id) => Type::Struct(*id),
                     None => {
                         return Err(CompileError::new(format!("unknown type `{}`", other), *sp))
@@ -455,20 +674,22 @@ impl Compiler {
         slot
     }
 
-    /// An imported module owns its binding for the whole program: nothing
-    /// else may be called `io` once `binz/io` is in scope. That is what lets
+    /// An imported module owns its binding for the whole file: nothing else
+    /// in it may be called `io` once `binz/io` is in scope. That is what lets
     /// `io.print` be read without checking whether `io` is a local struct.
     fn check_free(&self, name: &str, span: Span, what: &str) -> CResult<()> {
-        if self.imports.iter().any(|m| m == name) {
-            return Err(CompileError::new(
-                format!(
-                    "`{}` is the imported module `binz/{}`, so it cannot also be {}",
-                    name, name, what
-                ),
-                span,
-            ));
-        }
-        Ok(())
+        let sc = &self.files[self.cur];
+        let module = if sc.std_imports.iter().any(|m| m == name) {
+            format!("binz/{}", name)
+        } else if let Some((_, f)) = sc.mod_imports.iter().find(|(b, _)| b == name) {
+            self.displays[*f].clone()
+        } else {
+            return Ok(());
+        };
+        Err(CompileError::new(
+            format!("`{}` is the imported module `{}`, so it cannot also be {}", name, module, what),
+            span,
+        ))
     }
 
     fn declare(&mut self, name: &str, ty: Type, slot: u32, mutable: bool, span: Span) -> CResult<()> {
@@ -753,8 +974,15 @@ impl Compiler {
             },
             Expr::Field { base, name, span } => {
                 if let Some(m) = self.module_base(base)? {
+                    let module = match m {
+                        ModRef::Std(m) => format!("binz/{}", m),
+                        ModRef::Local(f) => self.displays[f].clone(),
+                    };
                     return Err(CompileError::new(
-                        format!("`{}.{}` is a stdlib function, not a place", m, name),
+                        format!(
+                            "`{}` is a function in `{}`, not a place that can be assigned to",
+                            name, module
+                        ),
                         *span,
                     ));
                 }
@@ -901,7 +1129,7 @@ impl Compiler {
                     }
                     return Ok(l.ty);
                 }
-                if let Some(idx) = self.fn_ids.get(name) {
+                if let Some(idx) = self.files[self.cur].fn_ids.get(name) {
                     let sig = self.sigs[*idx].clone();
                     self.emit_op_u32(OP_PUSH_FN, *idx as u32);
                     return Ok(Type::Fn(sig.params, Box::new(sig.ret)));
@@ -991,8 +1219,10 @@ impl Compiler {
             }
 
             Expr::Field { base, name, span } => {
-                if let Some(m) = self.module_base(base)? {
-                    return self.compile_module_value(&m, name, *span);
+                match self.module_base(base)? {
+                    Some(ModRef::Std(m)) => return self.compile_module_value(&m, name, *span),
+                    Some(ModRef::Local(f)) => return self.local_member(f, name, *span),
+                    None => {}
                 }
                 let (t, _) = self.compile_place(e)?;
                 if !t.is_aggregate() {
@@ -1148,7 +1378,7 @@ impl Compiler {
         fields: &[(String, Expr, Span)],
         span: Span,
     ) -> CResult<Type> {
-        let id = match self.struct_ids.get(name) {
+        let id = match self.files[self.cur].struct_ids.get(name) {
             Some(id) => *id,
             None => return Err(CompileError::new(format!("unknown struct `{}`", name), span)),
         };
@@ -1591,9 +1821,10 @@ impl Compiler {
         })
     }
 
-    /// `io`, when `base` is the bare name of an imported module. Returns an
-    /// error instead when it names a module the program forgot to import.
-    fn module_base(&self, base: &Expr) -> CResult<Option<String>> {
+    /// `io` or `math`, when `base` is the bare name of a module imported by
+    /// this file. Returns an error instead when it names a standard library
+    /// module the file forgot to import.
+    fn module_base(&self, base: &Expr) -> CResult<Option<ModRef>> {
         let (name, span) = match base {
             Expr::Ident(n, sp) => (n, *sp),
             _ => return Ok(None),
@@ -1601,8 +1832,12 @@ impl Compiler {
         if self.lookup(name).is_some() {
             return Ok(None);
         }
-        if self.imports.iter().any(|m| m == name) {
-            return Ok(Some(name.clone()));
+        let sc = &self.files[self.cur];
+        if sc.std_imports.iter().any(|m| m == name) {
+            return Ok(Some(ModRef::Std(name.clone())));
+        }
+        if let Some((_, f)) = sc.mod_imports.iter().find(|(b, _)| b == name) {
+            return Ok(Some(ModRef::Local(*f)));
         }
         if stdlib::is_module(name) {
             return Err(CompileError::new(
@@ -1614,6 +1849,54 @@ impl Compiler {
             ));
         }
         Ok(None)
+    }
+
+    /// `math.add`, where `math` is another file of this project. A module
+    /// exports every function it defines and nothing else, so this is just a
+    /// lookup in that file's own scope -- and the result is an ordinary
+    /// function value, exactly as a bare `add` would be inside `math.binz`.
+    fn local_member(&mut self, file: usize, name: &str, span: Span) -> CResult<Type> {
+        let binding = self.files[self.cur]
+            .mod_imports
+            .iter()
+            .find(|(_, f)| *f == file)
+            .map(|(b, _)| b.clone())
+            .unwrap_or_default();
+        let idx = match self.files[file].fn_ids.get(name) {
+            Some(i) => *i,
+            None => {
+                let what = if self.files[file].struct_ids.contains_key(name) {
+                    format!(
+                        "`{}` is a struct in `{}`, and a module exports its functions, not its types",
+                        name, self.displays[file]
+                    )
+                } else {
+                    format!("`{}` has no function `{}`", self.displays[file], name)
+                };
+                return Err(CompileError::new(what, span));
+            }
+        };
+        let sig = self.sigs[idx].clone();
+        // A struct belongs to the file that declares it, so a signature
+        // mentioning one cannot be written down here -- there is no way to
+        // name the type, and no way to pass a value of it.
+        for t in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+            if let Some(id) = struct_in(t) {
+                return Err(CompileError::new(
+                    format!(
+                        "`{}.{}` is typed with the struct `{}`, which `{}` does not export; \
+                         a module exports its functions, not its types",
+                        binding,
+                        name,
+                        self.structs[id].name,
+                        self.displays[file]
+                    ),
+                    span,
+                ));
+            }
+        }
+        self.emit_op_u32(OP_PUSH_FN, idx as u32);
+        Ok(Type::Fn(sig.params, Box::new(sig.ret)))
     }
 
     fn no_member(&self, module: &str, name: &str, span: Span) -> CompileError {
@@ -1679,8 +1962,15 @@ impl Compiler {
 
     fn compile_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> CResult<Type> {
         if let Expr::Field { base, name, .. } = callee {
-            if let Some(m) = self.module_base(base)? {
-                return self.compile_module_call(&m, name, args, span);
+            match self.module_base(base)? {
+                Some(ModRef::Std(m)) => return self.compile_module_call(&m, name, args, span),
+                Some(ModRef::Local(f)) => {
+                    // A local module's member is a plain function value, so
+                    // the call goes down the ordinary path from here.
+                    let ct = self.local_member(f, name, span)?;
+                    return self.finish_call(ct, args, span);
+                }
+                None => {}
             }
         }
         let ct = self.compile_expr(callee, None)?;
@@ -1752,6 +2042,72 @@ fn kind_code(k: Kind) -> u8 {
 }
 
 /// Conservative "does this block return on every path" check.
+/// The one spelling an `as` rename may have: the module's directory and its
+/// own name, joined the way binZ joins words everywhere else. `text/format`
+/// is `textFormat`. A file directly under the anchor uses `root`.
+///
+/// Two contested imports always differ in the directory (two files of the
+/// same name in one directory *are* one file), so this is unique without
+/// having to look at what else the file imports -- adding an import can never
+/// change the rename another one has to use.
+fn derived_alias(im: &ImportDef) -> String {
+    let n = im.path.len();
+    let parent = if n >= 2 { im.path[n - 2].as_str() } else { "root" };
+    let name = im.own_name();
+    format!("{}{}{}", parent, name[..1].to_ascii_uppercase(), &name[1..])
+}
+
+/// The module names this file claims more than once, each with the imports
+/// that claim it. Only these may be renamed with `as`, and each of them must
+/// be. Two imports of the *same* file are a duplicate, not a clash, so the
+/// files are counted distinctly.
+fn contested_names(f: &SourceFile) -> Vec<(String, Vec<String>)> {
+    let mut claims: Vec<(String, Vec<usize>, Vec<String>)> = Vec::new();
+    let mut dep = 0;
+    for item in &f.items {
+        let im = match item {
+            Item::Import(im) if im.local => im,
+            _ => continue,
+        };
+        let target = f.deps[dep];
+        dep += 1;
+        match claims.iter_mut().find(|(n, _, _)| n == im.own_name()) {
+            Some((_, targets, texts)) => {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                    texts.push(format!("`{}`", im.text()));
+                }
+            }
+            None => claims.push((im.own_name().to_string(), vec![target], vec![format!("`{}`", im.text())])),
+        }
+    }
+    claims
+        .into_iter()
+        .filter(|(_, targets, _)| targets.len() > 1)
+        .map(|(n, _, texts)| (n, texts))
+        .collect()
+}
+
+/// The `main` of a file, if it has one.
+fn fn_named<'a>(f: &'a SourceFile, name: &str) -> Option<&'a FnDef> {
+    f.items.iter().find_map(|i| match i {
+        Item::Fn(fd) if fd.name == name => Some(fd),
+        _ => None,
+    })
+}
+
+/// The first struct a type mentions, however deeply. Struct ids are per file,
+/// so this is what decides whether a signature can cross a module boundary.
+fn struct_in(t: &Type) -> Option<usize> {
+    match t {
+        Type::Struct(id) => Some(*id),
+        Type::Ptr(inner) | Type::Array(inner, _) | Type::Container(_, inner) => struct_in(inner),
+        Type::Map(_, k, v) => struct_in(k).or_else(|| struct_in(v)),
+        Type::Fn(ps, r) => ps.iter().find_map(struct_in).or_else(|| struct_in(r)),
+        _ => None,
+    }
+}
+
 fn block_returns(b: &Block) -> bool {
     b.stmts.iter().any(stmt_returns)
 }

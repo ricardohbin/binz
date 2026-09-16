@@ -1,0 +1,15 @@
+// One of two modules named `format`. Neither may keep the bare name in a file
+// that imports both -- see the `as` clause in examples/modules.binz.
+
+import binz/string;
+
+function pad(s: str, width: i32): str {
+    if (string.size(s) >= width) {
+        return s;
+    }
+    return s + string.repeat(" ", width - string.size(s));
+}
+
+function quote(s: str): str {
+    return "\"" + s + "\"";
+}
