@@ -3,6 +3,7 @@ mod bytecode;
 mod compiler;
 mod error;
 mod lexer;
+mod loader;
 mod obj;
 mod parser;
 mod stdlib;
@@ -22,22 +23,31 @@ usage:
   binz dump  <file.binzc>                   disassemble an artifact
 ";
 
+/// Loads the file and everything it imports, then compiles the whole graph
+/// as one program. A diagnostic names the file its span belongs to, which is
+/// not always the one on the command line.
 fn compile_path(path: &str) -> bytecode::Module {
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    // The file on the command line is the only one the shell is responsible
+    // for, so a missing one is a usage error rather than a compile error.
+    if let Err(e) = std::fs::metadata(path) {
+        eprintln!("error: cannot read {}: {}", path, e);
+        exit(2);
+    }
+    let prog = match loader::load(path) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("error: cannot read {}: {}", path, e);
-            exit(2);
+            let where_ = e.file.clone().unwrap_or_else(|| path.to_string());
+            let src = std::fs::read_to_string(&where_).unwrap_or_default();
+            eprint!("{}", e.report(&where_, &src));
+            exit(1);
         }
     };
-    let result = lexer::Lexer::new(&src)
-        .tokenize()
-        .and_then(|toks| parser::Parser::new(toks).parse_program())
-        .and_then(|items| compiler::compile(&items));
-    match result {
+    match compiler::compile(&prog) {
         Ok(m) => m,
         Err(e) => {
-            eprint!("{}", e.report(path, &src));
+            let where_ = e.file.clone().unwrap_or_else(|| path.to_string());
+            let src = prog.source_of(&where_).map(|f| f.src.clone()).unwrap_or_default();
+            eprint!("{}", e.report(&where_, &src));
             exit(1);
         }
     }

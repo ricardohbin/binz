@@ -16,8 +16,11 @@ pub enum Tok {
 
     // keywords
     Function,
-    /// `import`: only ever begins a top-level `import binz/<module>;`.
+    /// `import`: only ever begins a top-level `import binz/<module>;` or
+    /// `import @root/<path>.binz;`.
     Import,
+    /// `as`: renames a module, and only ever inside an `import`.
+    As,
     /// Reserved so `fn` gets a pointed diagnostic instead of "unknown name".
     Fn,
     Struct,
@@ -65,6 +68,8 @@ pub enum Tok {
     AndAnd,
     OrOr,
     Bang,
+    /// `@`: only ever the anchor of a local import, `@root/...`.
+    At,
 
     Eof,
 }
@@ -83,6 +88,7 @@ pub fn describe(t: &Tok) -> String {
         Tok::Str(_) => "string literal".to_string(),
         Tok::Function => "function".into(),
         Tok::Import => "import".into(),
+        Tok::As => "as".into(),
         Tok::Fn => "fn".into(),
         Tok::Struct => "struct".into(),
         Tok::Const => "const".into(),
@@ -123,6 +129,7 @@ pub fn describe(t: &Tok) -> String {
         Tok::AndAnd => "&&".into(),
         Tok::OrOr => "||".into(),
         Tok::Bang => "!".into(),
+        Tok::At => "@".into(),
         Tok::Eof => "end of file".into(),
     }
 }
@@ -212,6 +219,7 @@ impl Lexer {
                 match s.as_str() {
                     "function" => Tok::Function,
                     "import" => Tok::Import,
+                    "as" => Tok::As,
                     "fn" => Tok::Fn,
                     "struct" => Tok::Struct,
                     "const" => Tok::Const,
@@ -299,6 +307,7 @@ impl Lexer {
                     '*' => Tok::Star,
                     '/' => Tok::Slash,
                     '%' => Tok::Percent,
+                    '@' => Tok::At,
                     '-' => {
                         if self.peek() == '>' {
                             self.bump();

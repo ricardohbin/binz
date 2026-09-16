@@ -50,22 +50,51 @@ pub struct FnDef {
     pub span: Span,
 }
 
-/// `import binz/io;`. The path is stored segment by segment; the last one
-/// is the name the module is bound to, always, with no way to rename it.
+/// `import binz/io;` or `import @root/utils/math.binz;`. The path is stored
+/// segment by segment; the last one is the name the module is bound to,
+/// always, with no way to rename it.
 #[derive(Debug, Clone)]
 pub struct ImportDef {
+    /// True for `@root/...`, a file of this project. A local path holds only
+    /// the segments below the root, without the `.binz` extension, so the
+    /// last one is the file's own name and therefore the binding.
+    pub local: bool,
     pub path: Vec<String>,
+    /// `as othername`. Legal only when this file imports two or more modules
+    /// that are named the same -- and then required on every one of them, so
+    /// a name is never the default for one import and a rename for another.
+    pub alias: Option<Alias>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Alias {
+    pub name: String,
     pub span: Span,
 }
 
 impl ImportDef {
-    /// The binding, i.e. the `io` in `io.print`.
-    pub fn binding(&self) -> &str {
+    /// The module's own name: the `io` of `binz/io`, the `math` of
+    /// `@root/utils/math.binz`.
+    pub fn own_name(&self) -> &str {
         self.path.last().map(|s| s.as_str()).unwrap_or("")
     }
 
+    /// The binding, i.e. the `io` in `io.print` or the `math` in `math.add`.
+    pub fn binding(&self) -> &str {
+        match &self.alias {
+            Some(a) => &a.name,
+            None => self.own_name(),
+        }
+    }
+
+    /// The import exactly as it is written in source, for diagnostics.
     pub fn text(&self) -> String {
-        self.path.join("/")
+        if self.local {
+            format!("@root/{}.binz", self.path.join("/"))
+        } else {
+            self.path.join("/")
+        }
     }
 }
 

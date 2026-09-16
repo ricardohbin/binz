@@ -1,0 +1,12 @@
+// The other `format`. It sits in a different directory, which is exactly the
+// situation `as` exists for.
+
+import binz/float;
+
+function percent(fraction: f64): str {
+    return cast<str>(float.round(fraction * 1000.0) / 10.0) + "%";
+}
+
+function fixed(x: f64): str {
+    return cast<str>(float.round(x * 100.0) / 100.0);
+}

@@ -1,0 +1,26 @@
+// A module may import other modules, including modules of this project. The
+// graph is loaded from the entry file outwards, and a file reached twice is
+// still compiled once.
+
+import binz/container;
+import @root/modules/geometry.binz;
+
+function sum(v: Vector<i32>): i32 {
+    var total: i32 = 0;
+    var i: i32 = 0;
+    while (i < container.size(v)) {
+        total = total + v[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+function sumOfSquares(v: Vector<i32>): i32 {
+    var total: i32 = 0;
+    var i: i32 = 0;
+    while (i < container.size(v)) {
+        total = total + geometry.square(v[i]);
+        i = i + 1;
+    }
+    return total;
+}
