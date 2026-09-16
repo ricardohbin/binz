@@ -69,11 +69,23 @@ does not go in.
   only is allowed when there are two modules with the same name, BOTH need to
   renamed", then "two or more, for sure". Corollaries, all forced rather than
   invented: `as` on a **stdlib import is always an error** (no two stdlib
-  modules are named the same, so `io.print` reads identically everywhere); a
-  rename **may not be the module's own name** (not a rename) nor a **stdlib
-  name**; a rename is **one lowercase word** like any module; **a clash is per
-  file**; two imports of the *same* file are a duplicate, not a clash. The
-  whole rule is one four-way match on `(alias, clash)` in `check_rename`.
+  modules are named the same, so `io.print` reads identically everywhere);
+  **a clash is per file**; two imports of the *same* file are a duplicate, not
+  a clash. The whole rule is one four-way match on `(alias, clash)` in
+  `check_rename`.
+- **The rename itself is derived, not chosen — his call, same day.** I left it
+  free-form and flagged that as the weak half of the rule; he closed it with
+  `as textFormat` / `as numberFormat` and "I want it strict, in this way".
+  **A rename is the module's directory and its own name joined in camelCase**:
+  `text/format.binz` is `textFormat` and nothing else, every other spelling is
+  refused naming the right one, and a file directly under the anchor uses
+  `root` (`@root/format.binz` -> `rootFormat`). So there is **no free choice
+  anywhere in an import**. It stays local — two contested imports always
+  differ in the directory, since two files of the same name in one directory
+  *are* one file — so adding an import never changes another's rename.
+  **This is the first camelCase name that is not a member**: modules, files
+  and directories are one lowercase word, but a rename is two module names
+  *joined*, and camelCase is how binZ joins words.
 - **Standard library, 2026-09-14**: `import binz/io;` and every member is
   reached as `io.print`. The binding is the last path segment, **always** —
   no alias, no wildcard, no bare import — so two modules may both define
@@ -138,13 +150,17 @@ does not go in.
 - **No exported types** — a struct cannot cross a module boundary, so two
   files cannot share a data type. The next thing to decide about modules.
 - **A name clash is per file**, so one module can be `math` in one file and
-  `geomath` in another. Per-file is the only rule that does not make adding an
+  `geometryMath` in another. Per-file is the only rule that does not make adding an
   import to one file break another, but a reader moving between files sees two
   names for one module. Flagged 2026-09-15.
 - **`as` cannot resolve a clash with the standard library**: a file named
   `io.binz` is refused outright rather than being renameable, since his rule
   would otherwise demand renaming `binz/io` too. The one place the rule is not
   mechanical. Flagged 2026-09-15.
+- **Two contested files that share a parent directory name** (`a/x/format` and
+  `b/x/format`) both derive `xFormat` and collide, reported as a plain
+  "already imported". Rare; the fixes are a longer prefix (non-local) or a
+  dedicated diagnostic. Flagged 2026-09-15.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
 - `.binzc` artifact extension was my extrapolation from his `.binz` request.
 

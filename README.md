@@ -32,9 +32,11 @@ Every design decision below falls out of that rule.
 | `c[i]` indexes every container | one spelling for "the element at i", by position for a sequence and by key for a map |
 | `m[key] = value` is the only way into a map | it inserts when the key is new and overwrites when it is not |
 | Modules are lowercase, members are `camelCase`, types are `PascalCase` | one convention per kind of name, and a test in `src/stdlib.rs` holds the line |
+| An `as` rename is `camelCase` | it is two module names joined, and `camelCase` is how binZ joins words |
 | A module name is always `module.member` | no bare import, no wildcard — `io.print` reads the same in every file |
 | The binding is the last path segment, always | `binz/io` is `io`, `@root/utils/math.binz` is `math` |
 | `as` only when two imports in a file are named the same — and then on every one of them | a rename is never a second spelling; it exists only where there is no first one |
+| A rename is the directory plus the file name — `text/format.binz` is `textFormat` | not a choice: two people renaming the same clash write the same line |
 | A file of the project is imported from `@root` | one path for one file, wherever it is written — no `../` |
 | `container.size(c)` / `string.size(s)` / `map.size(m)` | one `size` per type family, rather than one name resolving three ways |
 | Sequences use `find` / `erase`, sets use `contains` / `remove` | positions and keys are different questions, so they get different verbs |
@@ -530,17 +532,31 @@ Two directories may hold two files of the same name. That is the one situation
 the default for one import and a rename for another:
 
 ```c
-import @root/text/format.binz   as textformat;
-import @root/number/format.binz as numberformat;
+import @root/modules/text/format.binz   as textFormat;
+import @root/modules/number/format.binz as numberFormat;
 ```
 
-Leaving either of them bare is an error, and so is renaming just one:
+**The rename is not a choice either.** It is the module's directory and its own
+name, joined the way binZ joins words everywhere else — `text/format.binz` is
+`textFormat` and nothing else. Two people renaming the same clash write the
+same line, and the diagnostic names the spelling rather than asking you to
+invent one:
 
 ```
-error: `@root/text/format.binz` and `@root/number/format.binz` are named
-`format`; when two or more imports in a file are named the same, every one of
-them is renamed, as in `import @root/text/format.binz as myformat;`
+error: `@root/modules/text/format.binz` and `@root/modules/number/format.binz`
+are named `format`; when two or more imports in a file are named the same,
+every one of them is renamed -- write
+`import @root/modules/text/format.binz as textFormat;`
+
+error: the rename of `@root/modules/text/format.binz` is `textFormat`, not
+`textformat1`: a rename is the directory and the file name joined, so it is
+not a choice either
 ```
+
+Two contested imports always differ in the directory — two files of the same
+name in one directory *are* one file — so the rename is unique without looking
+at what else the file imports. A file directly under the anchor borrows the
+anchor's name: `@root/format.binz` is `rootFormat`.
 
 Outside that situation `as` is refused, because a module would then have two
 spellings — the bare name and the rename — which is the thing the whole import
@@ -553,9 +569,9 @@ imported as `math`
 ```
 
 No two standard library modules are named the same, so `as` is never legal on
-one: `io.print` reads identically in every file of every program. A rename is
-a module name like any other — one lowercase word — it may not be the name the
-module already has, and it may not be a standard library module's name.
+one: `io.print` reads identically in every file of every program. A rename
+always carries a capital at the join, so it can never collide with a module
+name — those are one lowercase word.
 
 A clash is per file. The same module is `math` in a file that imports only it,
 and renamed in a file that imports both.

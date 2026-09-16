@@ -208,15 +208,19 @@ impl Compiler {
                         im.span,
                     ));
                 }
-                self.check_rename(f, im, &contested)?;
-                if stdlib::is_module(&name) {
+                self.check_rename(im, &contested)?;
+                // Only the file's own name can collide with the standard
+                // library: a rename always carries a capital at the join, so
+                // it can never be a lowercase module name.
+                if stdlib::is_module(im.own_name()) {
                     return Err(CompileError::new(
                         format!(
                             "`{}` is the standard library module `binz/{}`; a local module \
                              cannot take its name",
-                            name, name
+                            im.own_name(),
+                            im.own_name()
                         ),
-                        im.alias.as_ref().map(|a| a.span).unwrap_or(im.span),
+                        im.span,
                     ));
                 }
                 self.check_unbound(&name, im.span)?;
@@ -267,9 +271,12 @@ impl Compiler {
     /// renamed, so a name is never the default for one import and a rename
     /// for another -- and outside that situation `as` is an error, because a
     /// module would otherwise have two spellings.
+    ///
+    /// The rename itself is not a choice either: it is the directory and the
+    /// file name joined, so two people renaming the same clash write the same
+    /// line.
     fn check_rename(
         &self,
-        f: &SourceFile,
         im: &ImportDef,
         contested: &[(String, Vec<String>)],
     ) -> CResult<()> {
@@ -278,12 +285,12 @@ impl Compiler {
             (None, None) => Ok(()),
             (None, Some((name, files))) => Err(CompileError::new(
                 format!(
-                    "{} are named `{}`; when two or more imports in a file are named \
-                     the same, every one of them is renamed, as in `import {} as my{};`",
+                    "{} are named `{}`; when two or more imports in a file are named the \
+                     same, every one of them is renamed -- write `import {} as {};`",
                     stdlib::join_and(files),
                     name,
                     im.text(),
-                    name
+                    derived_alias(im)
                 ),
                 im.span,
             )),
@@ -297,16 +304,20 @@ impl Compiler {
                 ),
                 a.span,
             )),
-            (Some(a), Some(_)) if a.name == im.own_name() => Err(CompileError::new(
-                format!(
-                    "`as {}` is the name `{}` already has; a rename gives it a different one",
-                    a.name,
-                    im.text()
-                ),
-                a.span,
-            )),
-            (Some(_), Some(_)) => {
-                let _ = f;
+            (Some(a), Some(_)) => {
+                let want = derived_alias(im);
+                if a.name != want {
+                    return Err(CompileError::new(
+                        format!(
+                            "the rename of `{}` is `{}`, not `{}`: a rename is the directory \
+                             and the file name joined, so it is not a choice either",
+                            im.text(),
+                            want,
+                            a.name
+                        ),
+                        a.span,
+                    ));
+                }
                 Ok(())
             }
         }
@@ -2031,6 +2042,21 @@ fn kind_code(k: Kind) -> u8 {
 }
 
 /// Conservative "does this block return on every path" check.
+/// The one spelling an `as` rename may have: the module's directory and its
+/// own name, joined the way binZ joins words everywhere else. `text/format`
+/// is `textFormat`. A file directly under the anchor uses `root`.
+///
+/// Two contested imports always differ in the directory (two files of the
+/// same name in one directory *are* one file), so this is unique without
+/// having to look at what else the file imports -- adding an import can never
+/// change the rename another one has to use.
+fn derived_alias(im: &ImportDef) -> String {
+    let n = im.path.len();
+    let parent = if n >= 2 { im.path[n - 2].as_str() } else { "root" };
+    let name = im.own_name();
+    format!("{}{}{}", parent, name[..1].to_ascii_uppercase(), &name[1..])
+}
+
 /// The module names this file claims more than once, each with the imports
 /// that claim it. Only these may be renamed with `as`, and each of them must
 /// be. Two imports of the *same* file are a duplicate, not a clash, so the

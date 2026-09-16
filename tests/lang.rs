@@ -1342,10 +1342,11 @@ fn two_modules_of_the_same_name_are_both_renamed() {
             (
                 "main.binz",
                 "import binz/io;\n\
-                 import @root/geometry/math.binz as geomath;\n\
-                 import @root/utils/math.binz as utilmath;\n\
+                 import @root/geometry/math.binz as geometryMath;\n\
+                 import @root/utils/math.binz as utilsMath;\n\
                  function main(): i32 {\n\
-                     io.print(cast<str>(geomath.area(5)) + \" \" + cast<str>(utilmath.double(5)));\n\
+                     io.print(cast<str>(geometryMath.area(5)) + \" \"\n\
+                              + cast<str>(utilsMath.double(5)));\n\
                      return 0;\n\
                  }\n",
             ),
@@ -1375,7 +1376,12 @@ fn rejects_a_name_clash_with_neither_import_renamed() {
         "{}",
         err
     );
-    assert!(err.contains("every one of them is renamed"), "{}", err);
+    // The diagnostic names the one rename this import may have.
+    assert!(
+        err.contains("write `import @root/geometry/math.binz as geometryMath;`"),
+        "{}",
+        err
+    );
 }
 
 /// Renaming one of them is not enough: the other would still hold the name by
@@ -1389,7 +1395,7 @@ fn rejects_a_name_clash_with_only_one_import_renamed() {
             ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
             (
                 "main.binz",
-                "import @root/geometry/math.binz;\nimport @root/utils/math.binz as utilmath;\n\
+                "import @root/geometry/math.binz;\nimport @root/utils/math.binz as utilsMath;\n\
                  function main(): i32 { return 0; }\n",
             ),
         ],
@@ -1408,7 +1414,7 @@ fn rejects_a_rename_with_nothing_to_resolve() {
             ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
             (
                 "main.binz",
-                "import @root/utils/math.binz as utilmath;\nfunction main(): i32 { return 0; }\n",
+                "import @root/utils/math.binz as utilsMath;\nfunction main(): i32 { return 0; }\n",
             ),
         ],
     );
@@ -1427,57 +1433,60 @@ fn rejects_renaming_a_standard_library_module() {
     assert!(err.contains("`binz/io` is always reached as `io`"), "{}", err);
 }
 
+/// The rename is not a choice: it is the directory and the file name joined.
+/// Every other spelling is refused, including the ones the old free-form rule
+/// allowed -- a bare lowercase word, or a suffix that is not in the path.
 #[test]
-fn rejects_a_rename_to_the_name_the_module_already_has() {
-    let err = run_project_err(
-        "selfrename",
-        &[
-            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
-            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
-            (
-                "main.binz",
-                "import @root/geometry/math.binz as math;\n\
-                 import @root/utils/math.binz as utilmath;\n\
-                 function main(): i32 { return 0; }\n",
-            ),
-        ],
-    );
-    assert!(err.contains("a rename gives it a different one"), "{}", err);
+fn a_rename_is_the_one_the_path_gives() {
+    for wrong in ["geomath", "geometrymath", "geometryMath1", "math", "m", "GeometryMath"] {
+        let err = run_project_err(
+            &format!("derived_{}", wrong),
+            &[
+                ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
+                ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+                (
+                    "main.binz",
+                    &format!(
+                        "import @root/geometry/math.binz as {};\n\
+                         import @root/utils/math.binz as utilsMath;\n\
+                         function main(): i32 {{ return 0; }}\n",
+                        wrong
+                    ),
+                ),
+            ],
+        );
+        assert!(
+            err.contains("the rename of `@root/geometry/math.binz` is `geometryMath`"),
+            "`as {}` was not refused: {}",
+            wrong,
+            err
+        );
+    }
 }
 
+/// A file directly under the anchor has no directory to borrow, so it uses
+/// the anchor's own name.
 #[test]
-fn rejects_a_rename_onto_a_standard_library_name() {
-    let err = run_project_err(
-        "renameonstd",
+fn a_module_under_the_root_is_renamed_with_root() {
+    let out = run_project_ok(
+        "rootalias",
         &[
-            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
-            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            ("math.binz", "function double(n: i32): i32 { return n + n; }\n"),
+            ("utils/math.binz", "function triple(n: i32): i32 { return n + n + n; }\n"),
             (
                 "main.binz",
-                "import @root/geometry/math.binz as io;\n\
-                 import @root/utils/math.binz as utilmath;\n\
-                 function main(): i32 { return 0; }\n",
+                "import binz/io;\n\
+                 import @root/math.binz as rootMath;\n\
+                 import @root/utils/math.binz as utilsMath;\n\
+                 function main(): i32 {\n\
+                     io.print(cast<str>(rootMath.double(5)) + \" \"\n\
+                              + cast<str>(utilsMath.triple(5)));\n\
+                     return 0;\n\
+                 }\n",
             ),
         ],
     );
-    assert!(err.contains("is the standard library module `binz/io`"), "{}", err);
-}
-
-#[test]
-fn rejects_two_renames_onto_the_same_name() {
-    let err = run_project_err(
-        "renameclash",
-        &[
-            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
-            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
-            (
-                "main.binz",
-                "import @root/geometry/math.binz as m;\nimport @root/utils/math.binz as m;\n\
-                 function main(): i32 { return 0; }\n",
-            ),
-        ],
-    );
-    assert!(err.contains("`m` is already imported in this file"), "{}", err);
+    assert_eq!(out, "10 15\n");
 }
 
 /// A clash is per file, so the same module is `math` in a file that imports
@@ -1498,11 +1507,12 @@ fn a_clash_is_per_file() {
                 "main.binz",
                 "import binz/io;\n\
                  import @root/only.binz;\n\
-                 import @root/geometry/math.binz as geomath;\n\
-                 import @root/utils/math.binz as utilmath;\n\
+                 import @root/geometry/math.binz as geometryMath;\n\
+                 import @root/utils/math.binz as utilsMath;\n\
                  function main(): i32 {\n\
-                     io.print(cast<str>(only.twice(4)) + \" \" + cast<str>(geomath.area(3))\n\
-                              + \" \" + cast<str>(utilmath.double(1)));\n\
+                     io.print(cast<str>(only.twice(4)) + \" \"\n\
+                              + cast<str>(geometryMath.area(3)) + \" \"\n\
+                              + cast<str>(utilsMath.double(1)));\n\
                      return 0;\n\
                  }\n",
             ),
@@ -1511,21 +1521,4 @@ fn a_clash_is_per_file() {
     assert_eq!(out, "8 9 2\n");
 }
 
-/// A rename is a module name like any other: one lowercase word.
-#[test]
-fn rejects_a_rename_that_is_not_one_lowercase_word() {
-    let err = run_project_err(
-        "renamecase",
-        &[
-            ("geometry/math.binz", "function area(side: i32): i32 { return side * side; }\n"),
-            ("utils/math.binz", "function double(n: i32): i32 { return n + n; }\n"),
-            (
-                "main.binz",
-                "import @root/geometry/math.binz as GeoMath;\n\
-                 import @root/utils/math.binz as utilmath;\n\
-                 function main(): i32 { return 0; }\n",
-            ),
-        ],
-    );
-    assert!(err.contains("a renamed module is lowercase"), "{}", err);
-}
+

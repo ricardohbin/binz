@@ -115,9 +115,11 @@ impl Parser {
             }
             (false, path)
         };
+        // The alias is not checked here: it is not a free choice, so the
+        // compiler names the one spelling the path gives rather than
+        // rejecting shapes one at a time.
         let alias = if self.eat(&Tok::As) {
             let (name, asp) = self.ident()?;
-            check_module_name(&name, asp, "a renamed module")?;
             Some(Alias { name, span: asp })
         } else {
             None
@@ -652,21 +654,15 @@ impl Stmt {
 /// name -- the file's own name becomes the binding, and binZ spells a module
 /// in lowercase. One convention, checked where the path is written.
 fn check_path_segment(seg: &str, span: Span) -> CResult<()> {
-    check_module_name(
-        seg,
-        span,
-        "a directory or file under `@root`",
-    )
-}
-
-/// One lowercase word, which is how binZ spells every module name -- so an
-/// `as` rename reads exactly like the name it replaces.
-fn check_module_name(name: &str, span: Span, what: &str) -> CResult<()> {
-    let ok = name.starts_with(|c: char| c.is_ascii_lowercase())
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let ok = seg.starts_with(|c: char| c.is_ascii_lowercase())
+        && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     if !ok {
         return Err(CompileError::new(
-            format!("`{}` is not a module name; {} is lowercase, like every module name", name, what),
+            format!(
+                "`{}` is not a module path segment; a directory or file under `@root` \
+                 is lowercase, like every module name",
+                seg
+            ),
             span,
         ));
     }

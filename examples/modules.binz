@@ -15,14 +15,17 @@
 // name is never the default for one import and a rename for another. Outside
 // that situation `as` is an error, because a module would have two spellings.
 //
+// The rename is not a choice either: it is the directory and the file name
+// joined, so `text/format.binz` is `textFormat` and nothing else.
+//
 // Run this from anywhere:  binz run examples/modules.binz
 
 import binz/io;
 import binz/container;
 import @root/modules/geometry.binz;
 import @root/modules/tally.binz;
-import @root/modules/text/format.binz as textformat;
-import @root/modules/number/format.binz as numberformat;
+import @root/modules/text/format.binz as textFormat;
+import @root/modules/number/format.binz as numberFormat;
 
 function main(): i32 {
     io.print("-- geometry --");
@@ -36,8 +39,8 @@ function main(): i32 {
     io.print("sumOfSquares       = " + cast<str>(tally.sumOfSquares(v)));
 
     io.print("-- two modules named `format`, so both are renamed --");
-    io.print(textformat.pad("left", 10) + textformat.quote("right"));
-    io.print(numberformat.percent(0.4267) + " " + numberformat.fixed(2.71828));
+    io.print(textFormat.pad("left", 10) + textFormat.quote("right"));
+    io.print(numberFormat.percent(0.4267) + " " + numberFormat.fixed(2.71828));
 
     // A module's function is an ordinary value, because its type is writable
     // in binZ -- the same rule that makes `io.print` a value.
