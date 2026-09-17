@@ -1,5 +1,6 @@
 //! The binZ standard library: `binz/io`, `binz/string`, `binz/int`,
-//! `binz/float`, `binz/container`, `binz/map` and `binz/test`.
+//! `binz/float`, `binz/container`, `binz/map`, `binz/random` and
+//! `binz/test`.
 //!
 //! A module is made visible with `import binz/<name>;` and every one of its
 //! members is then reached as `<name>.<member>`. That is the only spelling:
@@ -35,7 +36,8 @@ use crate::types::{Kind, Type};
 
 /// Every module, in the order they are documented. The `binz/` prefix is
 /// part of the import path and is not repeated here.
-pub const MODULES: &[&str] = &["io", "string", "int", "float", "container", "map", "test"];
+pub const MODULES: &[&str] =
+    &["io", "string", "int", "float", "container", "map", "random", "test"];
 
 pub type NativeSig = fn() -> Type;
 
@@ -98,6 +100,14 @@ pub const NATIVES: &[Native] = &[
     Native { module: "float", name: "sqrt", sig: sig!(Type::F64 => Type::F64) },
     Native { module: "float", name: "pow", sig: sig!(Type::F64, Type::F64 => Type::F64) },
     Native { module: "float", name: "isNan", sig: sig!(Type::F64 => Type::Bool) },
+    // ------------------------------------------------------ binz/random
+    // A member is named for the type it answers, because that is the whole
+    // of what it is: `random.f64()` is a random `f64`. Seeded from the
+    // operating system once per process, with no way to set the seed --
+    // code that has to be predictable stubs the module function that reads
+    // a random number, rather than replaying it.
+    Native { module: "random", name: "f64", sig: sig!( => Type::F64) },
+    Native { module: "random", name: "i32", sig: sig!(Type::I32, Type::I32 => Type::I32) },
     // -------------------------------------------------------- binz/test
     // Fails the test that calls it, for the case equality cannot state: a
     // branch that should not have been reached.
@@ -277,6 +287,8 @@ mod tests {
             "float.sqrt",
             "float.pow",
             "float.isNan",
+            "random.f64",
+            "random.i32",
             "test.fail",
         ];
         let actual: Vec<String> = (0..NATIVES.len() as u32).map(native_name).collect();

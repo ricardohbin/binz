@@ -376,6 +376,7 @@ words, and `container.add` does not stop you writing your own
 | `binz/float` | `parse` `canParse` `abs` `min` `max` `floor` `ceil` `round` `sqrt` `pow` `isNan` |
 | `binz/container` | the eleven container verbs, [above](#containers) |
 | `binz/map` | the six map verbs, [above](#maps) |
+| `binz/random` | `f64` `i32` — [below](#binzrandom) |
 | `binz/test` | `equal` `calls` `fail`, reachable only from a test — [below](#tests) |
 
 ### Which members are values
@@ -442,6 +443,47 @@ where to go instead:
 ```
 error: `int.abs` needs an `i32` or an `i64`, found `f64`; an `f64` answers `float.abs`
 ```
+
+### binz/random
+
+A member is named for the type it answers, because that is the whole of what
+it is:
+
+```c
+import binz/random;
+
+const r: f64 = random.f64();       // 0.0 <= r < 1.0, never 1.0
+const d: i32 = random.i32(1, 6);   // a die -- both ends included
+```
+
+`random.i32` traps on a backwards range, since an empty range has no value to
+answer with and binZ has no `null`. Both members are monomorphic, so both are
+ordinary function values.
+
+The generator is seeded from the operating system once per process and
+**there is no way to set the seed**. Code that has to be predictable does not
+replay a random number — it [stubs](#stubbing-a-module) the module function
+that reads one. The standard library is not stubbable, so the seam is always
+your own function:
+
+```c
+// rates.binz -- the dependency a test cannot predict
+function lookup(country: str): f64 {
+    return random.f64();
+}
+```
+
+```c
+@test function appliesTheRate(): void {
+    stub rates.lookup(country: str): f64 { return 0.5; }
+
+    test.equal(total(100.0, "br"), 50.0);
+}
+```
+
+Without that stub, all a test can say about `total(100.0, "br")` is that it
+lands between `0.0` and `100.0` — which is what `examples/orders.binz` shows
+side by side.
 
 ### When a name is missing
 
@@ -706,7 +748,9 @@ The compiler is one pass: because binZ has no inference beyond literal typing,
 a type hint threaded downwards is enough to check and emit at the same time.
 
 The standard library is compiled in, not written in binZ, and `src/stdlib.rs`
-is its whole table. A monomorphic member is a *native*: its index is a
+is its whole table. `binz/random` is the one member with state: an xorshift64*
+word in the VM, seeded from the platform through `RandomState`, so the
+language still has no dependencies. A monomorphic member is a *native*: its index is a
 bytecode operand, it is pushed as an ordinary function value, and the VM
 executes it in `call_native`. A generic member is a *form*: the compiler
 resolves it against the type of its first argument and emits `OP_BUILTIN`.
@@ -768,8 +812,9 @@ and carries the tests it found.
 Slices, user-written generics, closures, exported types (a module exports its
 functions only), methods, enums/unions, bitwise operators, and
 unsigned integers. The standard library is a scratch: no file or process I/O
-beyond `io.print`, no time, no random. A test run has no setup, no teardown and no
-filter — `binz test <file>` runs everything it can reach. `cast<str>` formats
+beyond `io.print`, no time. `binz/random` cannot be seeded, so a
+failing random case cannot be replayed. A test run has no setup, no teardown
+and no filter — `binz test <file>` runs everything it can reach. `cast<str>` formats
 scalars only, so a
 container is printed by iterating it. Heap containers cannot hold structs, and their elements have no
 address. Dangling pointers are detectable but not prevented — pointer

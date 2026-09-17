@@ -113,13 +113,22 @@ does not go in.
   record anything**. Each test runs in a fresh VM, so a stub dies with it.
   Artifact `VERSION` 3 -> 4: `Module.entry` is now optional and the module
   carries its test table. Rationale in `memory/2026-09-17.md`.
+- **`binz/random`, 2026-09-17 — his call over putting it on `int`/`float`.**
+  A member is named for the type it answers: `random.f64()` in `[0, 1)` and
+  `random.i32(lo, hi)` with **both ends included**, so `random.i32(1, 6)` is a
+  die; a backwards range traps. **Seeded from the OS per process, with no way
+  to set the seed** — code that must be predictable stubs the module function
+  that reads a random number rather than replaying one. xorshift64* in a
+  `Cell` on the VM, the only stdlib member with state, seeded through
+  `RandomState` so binZ still has no dependencies; the range comes from the
+  **high** bits, since the low ones repeated across runs.
 - **Standard library, 2026-09-14**: `import binz/io;` and every member is
   reached as `io.print`. The binding is the last path segment, **always** —
   no alias, no wildcard, no bare import — so two modules may both define
   `find` and there is no resolution rule to learn. An import owns its binding for the
   whole *file* (nothing else in it may be named `io`); imports come first in
   a file.
-  Modules: `io` `string` `int` `float` `container` `map` `test`. **Naming, his call
+  Modules: `io` `string` `int` `float` `container` `map` `random` `test`. **Naming, his call
   2026-09-14: modules lowercase, members `camelCase` (`startsWith`,
   `canParse`), types `PascalCase`** — a test in `src/stdlib.rs` enforces it.
   **`size`, `find` and
@@ -213,8 +222,9 @@ does not go in.
 Slices, closures, user-written generics, **exported types** (a module exports
 its functions only), methods, enums, bitwise ops, unsigned ints.
 The stdlib is a scratch: `io` has only `print` — no input, no stderr, no
-files, no time, no random. A test run has no setup, teardown or filter, and
-cannot stub the standard library. `cast<str>` still formats
+files, no time. `binz/random` cannot be seeded, so a failing random case
+cannot be replayed. A test run has no setup, teardown or filter, and cannot
+stub the standard library. `cast<str>` still formats
 scalars only, so a container is printed by iterating it. Heap containers
 cannot hold structs and their elements have no address. Pointer lifetimes are
 C-like, not borrow-checked — dangling pointers trap at runtime but are not

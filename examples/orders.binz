@@ -22,7 +22,8 @@ function discounted(amount: f64, country: str): f64 {
 
 // `stub` replaces the module's function for the length of this test, wherever
 // it is called from -- `discounted` calls `total`, which calls `rates.lookup`,
-// and nothing had to be passed down to reach it.
+// and nothing had to be passed down to reach it. Without that, none of these
+// could be written at all: the real rate is random.
 @test function takesTenOffALargeOrder(): void {
     stub rates.lookup(country: str): f64 { return 1.0; }
 
@@ -44,14 +45,19 @@ function discounted(amount: f64, country: str): f64 {
     test.equal(test.calls(rates.lookup), 1);
 }
 
-// No stub: this one runs the real module, and prints while it does.
-@test function usesTheRealRate(): void {
-    test.equal(total(100.0, "br"), 80.0);
+// No stub, and this is all that is left: the real rate is a random fraction,
+// so the value cannot be named -- only bounded. That is what stubbing buys.
+@test function withoutAStubOnlyTheBoundsHold(): void {
+    const full: f64 = total(100.0, "br");
+
+    test.equal(full >= 0.0 && full < 100.0, true);
 }
 
-// For the case equality cannot state.
-@test function refusesAnUnknownCountry(): void {
-    if (total(1.0, "zz") == 0.0) {
-        test.fail("an unknown country should fall back to 1.0, not 0.0");
+// For the case equality cannot state: a branch that should not be reached.
+@test function neverDiscountsASmallOrder(): void {
+    stub rates.lookup(country: str): f64 { return 0.1; }
+
+    if (discounted(50.0, "br") < 5.0) {
+        test.fail("a small order must not be discounted");
     }
 }

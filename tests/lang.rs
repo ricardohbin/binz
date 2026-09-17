@@ -17,7 +17,8 @@ fn write_temp(name: &str, src: &str) -> std::path::PathBuf {
 /// so a test only has to say what it is about. The import rules themselves
 /// are exercised by `run_raw_err`, which writes its own file head.
 const PRELUDE: &str = "import binz/io;\nimport binz/string;\nimport binz/int;\n\
-                       import binz/float;\nimport binz/container;\nimport binz/map;\n";
+                       import binz/float;\nimport binz/container;\nimport binz/map;\n\
+                       import binz/random;\n";
 
 /// Runs a program, asserting it exits 0, and returns its stdout.
 fn run_ok(name: &str, src: &str) -> String {
@@ -2091,4 +2092,118 @@ fn a_stub_cannot_call_what_it_replaces() {
         ],
     );
     assert!(err.contains("a stub cannot reach `lookup`"), "{}", err);
+}
+
+// ----------------------------------------------------------- binz/random
+
+/// `random.f64()` answers `[0, 1)` -- never 1.0, since that is the half-open
+/// range every other language's random float agrees on.
+#[test]
+fn a_random_f64_is_a_fraction() {
+    let out = run_ok(
+        "randomf64",
+        &in_main(
+            r#"
+            var i: i32 = 0;
+            var lo: bool = true;
+            var hi: bool = true;
+            var same: i32 = 0;
+            const first: f64 = random.f64();
+            while (i < 5000) {
+                const r: f64 = random.f64();
+                if (r < 0.0) { lo = false; }
+                if (r >= 1.0) { hi = false; }
+                if (r == first) { same = same + 1; }
+                i = i + 1;
+            }
+            io.print(cast<str>(lo) + " " + cast<str>(hi) + " " + cast<str>(same < 5));
+        "#,
+        ),
+    );
+    assert_eq!(out, "true true true\n");
+}
+
+/// Both ends are included, so `random.i32(1, 6)` is a die -- and over enough
+/// throws every face turns up.
+#[test]
+fn a_random_i32_covers_its_range() {
+    let out = run_ok(
+        "randomi32",
+        &in_main(
+            r#"
+            var counts: Vector<i32> = Vector<i32>{ 0, 0, 0, 0, 0, 0 };
+            var i: i32 = 0;
+            while (i < 6000) {
+                const d: i32 = random.i32(1, 6);
+                counts[d - 1] = counts[d - 1] + 1;
+                i = i + 1;
+            }
+            var j: i32 = 0;
+            var every: bool = true;
+            while (j < 6) {
+                if (counts[j] < 500) { every = false; }
+                j = j + 1;
+            }
+            io.print(cast<str>(every) + " " + cast<str>(random.i32(4, 4)));
+        "#,
+        ),
+    );
+    assert_eq!(out, "true 4\n");
+}
+
+/// An empty range has no value to answer with, and binZ has no `null`.
+#[test]
+fn a_backwards_random_range_traps() {
+    let e = run_err("randomempty", &in_main("io.print(cast<str>(random.i32(6, 1)));"));
+    assert!(e.contains("empty range 6..1"), "{}", e);
+}
+
+/// Both members are monomorphic, so both are ordinary function values -- the
+/// same rule that makes `io.print` one.
+#[test]
+fn random_members_are_values() {
+    let out = run_ok(
+        "randomvalues",
+        &in_main(
+            r#"
+            const fraction: function(): f64 = random.f64;
+            const die: function(i32, i32): i32 = random.i32;
+            io.print(cast<str>(fraction() < 1.0) + " " + cast<str>(die(3, 3)));
+        "#,
+        ),
+    );
+    assert_eq!(out, "true 3\n");
+}
+
+/// The standard library is not stubbable, so a test replaces the module
+/// function that reads a random number -- which is the whole seam.
+#[test]
+fn a_random_dependency_is_stubbed_at_the_module() {
+    let report = tests_pass(
+        "randomstub",
+        &[
+            (
+                "rates.binz",
+                "import binz/random;\n\
+                 function lookup(country: str): f64 { return random.f64(); }\n",
+            ),
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function total(amount: f64, country: str): f64 {\n\
+                     return amount * rates.lookup(country);\n\
+                 }\n\
+                 @test function appliesTheRate(): void {\n\
+                     stub rates.lookup(country: str): f64 { return 0.5; }\n\
+                     test.equal(total(100.0, \"br\"), 50.0);\n\
+                 }\n\
+                 @test function withoutAStubOnlyTheBoundsHold(): void {\n\
+                     const full: f64 = total(100.0, \"br\");\n\
+                     test.equal(full >= 0.0 && full < 100.0, true);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(report.contains("2 passed"), "{}", report);
 }

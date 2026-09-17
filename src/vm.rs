@@ -3,6 +3,7 @@
 //! Two stacks: `mem` holds call frames and is byte-addressable at slot
 //! granularity (that is what a `*T` points at), `stack` holds operands.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::bytecode::*;
@@ -43,6 +44,15 @@ struct Frame {
     sret: usize,
 }
 
+/// A seed from the operating system, without a dependency: `RandomState` is
+/// what a `HashMap` uses to make itself unpredictable, and it is seeded per
+/// process by the platform. Forced odd, since xorshift is stuck on zero.
+fn os_seed() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish() | 1
+}
+
 pub fn format_f64(v: f64) -> String {
     let s = format!("{}", v);
     if v.is_finite() && !s.contains('.') && !s.contains('e') && !s.contains("NaN") {
@@ -63,6 +73,10 @@ pub struct Vm {
     /// Calls made to each function, for `test.calls`. Empty outside a test
     /// run, which is the flag that switches counting off.
     counts: Vec<u32>,
+    /// `binz/random`'s state: xorshift64*, seeded once per run from the
+    /// operating system. A `Cell` because a native is handed `&self`, and
+    /// randomness is the only one of them that has state at all.
+    rng: Cell<u64>,
 }
 
 macro_rules! rt {
@@ -106,6 +120,7 @@ impl Vm {
             frames: Vec::new(),
             redirect: Vec::new(),
             counts: if counting { vec![0; m.funcs.len()] } else { Vec::new() },
+            rng: Cell::new(os_seed()),
         };
         vm.mem.resize(m.funcs[func].n_slots as usize, Value::Void);
         vm.frames.push(Frame { func, pc: 0, fp: 0, sret: 0 });
@@ -673,6 +688,23 @@ impl Vm {
         })
     }
 
+    /// xorshift64*, which is small, has no state to carry between calls but
+    /// its own word, and is far better than binZ needs.
+    fn next_u64(&self) -> u64 {
+        let mut x = self.rng.get();
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng.set(x);
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// The 53 bits an `f64` can hold exactly, so every value in `[0, 1)` is
+    /// equally likely and none is rounded to `1.0`.
+    fn next_f64(&self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
     /// A value as a failed `test.equal` prints it -- which is exactly how
     /// `cast<str>` prints it, since that is the one formatter binZ has.
     fn show(&self, v: Value, m: &Module) -> Result<String, RuntimeError> {
@@ -889,8 +921,24 @@ impl Vm {
             26 => Value::F64(self.f64_arg(&args[0], m)?.powf(self.f64_arg(&args[1], m)?)),
             27 => Value::Bool(self.f64_arg(&args[0], m)?.is_nan()),
 
+            // -------------------------------------------------- random
+            28 => Value::F64(self.next_f64()),
+            29 => {
+                let lo = self.i32_arg(&args[0], m)?;
+                let hi = self.i32_arg(&args[1], m)?;
+                if lo > hi {
+                    rt!(self, m, "`random.i32` was given the empty range {}..{}", lo, hi);
+                }
+                // Both ends are included, so `random.i32(1, 6)` is a die.
+                // The range is taken from the *high* bits -- xorshift's low
+                // ones are its weakest, and this avoids modulo bias too.
+                let span = (hi as i64 - lo as i64 + 1) as u128;
+                let at = (self.next_u64() as u128 * span) >> 64;
+                Value::I32((lo as i64 + at as i64) as i32)
+            }
+
             // ---------------------------------------------------- test
-            28 => rt!(self, m, "{}", self.str_arg(&args[0], m)?),
+            30 => rt!(self, m, "{}", self.str_arg(&args[0], m)?),
 
             _ => rt!(self, m, "unknown stdlib function #{}", idx),
         })
