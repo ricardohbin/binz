@@ -48,6 +48,29 @@ pub struct FnDef {
     pub ret: TypeExpr,
     pub body: Block,
     pub span: Span,
+    /// Written `@test function ...`. A test is compiled and run by
+    /// `binz test` alone: `binz build` and `binz run` leave it out of the
+    /// artifact entirely, so a test can never be reached from a program.
+    pub is_test: bool,
+}
+
+/// `stub math.add(a: i32, b: i32): i32 { return 42; }` -- replaces an
+/// imported module's function for the rest of the test that writes it. The
+/// signature is written out in full and has to match the real one: binZ
+/// infers nothing anywhere else either, and a stub that has drifted from the
+/// function it fakes is the one bug a test lib must not hide.
+#[derive(Debug, Clone)]
+pub struct StubDef {
+    /// The module binding and the member: the `math` and the `add` of
+    /// `stub math.add`.
+    pub module: String,
+    pub member: String,
+    pub params: Vec<Param>,
+    pub ret: TypeExpr,
+    pub body: Block,
+    /// The `math.add` itself, for a diagnostic about the target.
+    pub target_span: Span,
+    pub span: Span,
 }
 
 /// `import binz/io;` or `import @root/utils/math.binz;`. The path is stored
@@ -139,6 +162,8 @@ pub enum Stmt {
         span: Span,
     },
     Nested(Block, Span),
+    /// `stub math.add(...): T { ... }`, only at the top of an `@test` body.
+    Stub(StubDef),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

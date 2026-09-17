@@ -1,0 +1,11 @@
+import binz/io;
+
+/// The module a test would rather not run: it says so out loud, which is how
+/// `examples/tests.binz` shows that a stub really took.
+function lookup(country: str): f64 {
+    io.print("  (the real rates module ran)");
+    if (country == "br") {
+        return 0.8;
+    }
+    return 1.0;
+}

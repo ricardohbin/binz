@@ -1,0 +1,57 @@
+import binz/test;
+import @root/modules/rates.binz;
+
+// A test lives in the file it tests, tagged `@test`, and `binz test` is the
+// only thing that runs one. `binz build` and `binz run` do not compile a test
+// at all, so nothing here weighs anything in the artifact.
+//
+// There is no `main` here: a test run needs no program, which is what lets a
+// file be tested on its own.
+
+function total(amount: f64, country: str): f64 {
+    return amount * rates.lookup(country);
+}
+
+function discounted(amount: f64, country: str): f64 {
+    const full: f64 = total(amount, country);
+    if (full > 100.0) {
+        return full - 10.0;
+    }
+    return full;
+}
+
+// `stub` replaces the module's function for the length of this test, wherever
+// it is called from -- `discounted` calls `total`, which calls `rates.lookup`,
+// and nothing had to be passed down to reach it.
+@test function takesTenOffALargeOrder(): void {
+    stub rates.lookup(country: str): f64 { return 1.0; }
+
+    test.equal(discounted(200.0, "br"), 190.0);
+}
+
+@test function leavesASmallOrderAlone(): void {
+    stub rates.lookup(country: str): f64 { return 1.0; }
+
+    test.equal(discounted(50.0, "br"), 50.0);
+}
+
+// A stub cannot record anything -- binZ has no globals and no closures -- so
+// the library counts calls, and the count is asserted like any other value.
+@test function readsTheRateOnce(): void {
+    stub rates.lookup(country: str): f64 { return 1.0; }
+
+    test.equal(discounted(200.0, "br"), 190.0);
+    test.equal(test.calls(rates.lookup), 1);
+}
+
+// No stub: this one runs the real module, and prints while it does.
+@test function usesTheRealRate(): void {
+    test.equal(total(100.0, "br"), 80.0);
+}
+
+// For the case equality cannot state.
+@test function refusesAnUnknownCountry(): void {
+    if (total(1.0, "zz") == 0.0) {
+        test.fail("an unknown country should fall back to 1.0, not 0.0");
+    }
+}

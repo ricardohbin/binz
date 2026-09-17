@@ -1,5 +1,5 @@
 //! The binZ standard library: `binz/io`, `binz/string`, `binz/int`,
-//! `binz/float`, `binz/container` and `binz/map`.
+//! `binz/float`, `binz/container`, `binz/map` and `binz/test`.
 //!
 //! A module is made visible with `import binz/<name>;` and every one of its
 //! members is then reached as `<name>.<member>`. That is the only spelling:
@@ -35,7 +35,7 @@ use crate::types::{Kind, Type};
 
 /// Every module, in the order they are documented. The `binz/` prefix is
 /// part of the import path and is not repeated here.
-pub const MODULES: &[&str] = &["io", "string", "int", "float", "container", "map"];
+pub const MODULES: &[&str] = &["io", "string", "int", "float", "container", "map", "test"];
 
 pub type NativeSig = fn() -> Type;
 
@@ -98,6 +98,10 @@ pub const NATIVES: &[Native] = &[
     Native { module: "float", name: "sqrt", sig: sig!(Type::F64 => Type::F64) },
     Native { module: "float", name: "pow", sig: sig!(Type::F64, Type::F64 => Type::F64) },
     Native { module: "float", name: "isNan", sig: sig!(Type::F64 => Type::Bool) },
+    // -------------------------------------------------------- binz/test
+    // Fails the test that calls it, for the case equality cannot state: a
+    // branch that should not have been reached.
+    Native { module: "test", name: "fail", sig: sig!(Type::Str => Type::Void) },
 ];
 
 use crate::bytecode::*;
@@ -133,6 +137,12 @@ pub const FORMS: &[Form] = &[
     Form { module: "int", name: "abs", id: B_INT_ABS, arity: 1 },
     Form { module: "int", name: "min", id: B_INT_MIN, arity: 2 },
     Form { module: "int", name: "max", id: B_INT_MAX, arity: 2 },
+    // -------------------------------------------------------- binz/test
+    // `equal` is generic over whatever `==` accepts, and `calls` over the
+    // signature of the function it is handed, so neither type can be
+    // written down -- both are forms.
+    Form { module: "test", name: "equal", id: B_TEST_EQUAL, arity: 2 },
+    Form { module: "test", name: "calls", id: B_TEST_CALLS, arity: 1 },
 ];
 
 pub fn is_module(name: &str) -> bool {
@@ -159,6 +169,10 @@ pub fn native_name(idx: u32) -> String {
 /// instead. Without this, `map.find(m, k)` would be answered by pointing at
 /// `binz/container`, which does not accept a map either.
 pub const MISUSED: &[(&str, &str, &str)] = &[
+    ("test", "notEqual", "write `test.equal` with the answer you do expect"),
+    ("test", "assert", "`test.equal(condition, true)` states what is expected"),
+    ("test", "check", "`test.equal(condition, true)` states what is expected"),
+    ("test", "called", "`test.calls` answers how many times, so compare it"),
     ("map", "find", "a map is keyed by value; use `map.contains`"),
     ("map", "add", "write `m[key] = value`"),
     ("map", "push", "write `m[key] = value`"),
@@ -263,6 +277,7 @@ mod tests {
             "float.sqrt",
             "float.pow",
             "float.isNan",
+            "test.fail",
         ];
         let actual: Vec<String> = (0..NATIVES.len() as u32).map(native_name).collect();
         assert_eq!(actual, expected);

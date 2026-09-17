@@ -4,7 +4,7 @@
 //!   magic "BINZ" | version u32 | strings | functions | entry u32
 
 pub const MAGIC: &[u8; 4] = b"BINZ";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 pub const OP_PUSH_I32: u8 = 0x01;
 pub const OP_PUSH_I64: u8 = 0x02;
@@ -51,6 +51,10 @@ pub const OP_POP: u8 = 0x43;
 
 pub const OP_CALL: u8 = 0x50;
 pub const OP_RET: u8 = 0x51;
+/// `[target: u32]` -- pops a function value and makes every later call of
+/// function `target` land in it instead, for the rest of the test. Only a
+/// `binz test` run ever contains this instruction.
+pub const OP_STUB: u8 = 0x52;
 
 pub const OP_CAST: u8 = 0x60;
 
@@ -86,6 +90,8 @@ pub const B_KEYS: u8 = 11;
 pub const B_INT_ABS: u8 = 12;
 pub const B_INT_MIN: u8 = 13;
 pub const B_INT_MAX: u8 = 14;
+pub const B_TEST_EQUAL: u8 = 15;
+pub const B_TEST_CALLS: u8 = 16;
 
 pub fn builtin_name(id: u8) -> &'static str {
     crate::stdlib::form_name(id)
@@ -111,11 +117,24 @@ pub struct FnMeta {
     pub code: Vec<u8>,
 }
 
+/// One `@test` function, as `binz test` reports it.
+#[derive(Debug, Clone)]
+pub struct TestMeta {
+    pub name: String,
+    /// The file it was written in, for a run that spans a whole import graph.
+    pub file: String,
+    pub func: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub strings: Vec<String>,
     pub funcs: Vec<FnMeta>,
-    pub entry: u32,
+    /// `main`. A module compiled for `binz test` has none: a test run needs
+    /// no program, which is what lets a module be tested on its own.
+    pub entry: Option<u32>,
+    /// Empty unless the module was compiled by `binz test`.
+    pub tests: Vec<TestMeta>,
 }
 
 // ------------------------------------------------------------- serialization
@@ -158,7 +177,19 @@ pub fn serialize(m: &Module) -> Vec<u8> {
         w.u32(f.code.len() as u32);
         w.buf.extend_from_slice(&f.code);
     }
-    w.u32(m.entry);
+    match m.entry {
+        Some(e) => {
+            w.u8(1);
+            w.u32(e);
+        }
+        None => w.u8(0),
+    }
+    w.u32(m.tests.len() as u32);
+    for t in &m.tests {
+        w.str(&t.name);
+        w.str(&t.file);
+        w.u32(t.func);
+    }
     w.buf
 }
 
@@ -220,8 +251,16 @@ pub fn deserialize(buf: &[u8]) -> Result<Module, String> {
         let code = r.take(code_len)?.to_vec();
         funcs.push(FnMeta { name, param_sizes, n_slots, sret, ret_size, code });
     }
-    let entry = r.u32()?;
-    Ok(Module { strings, funcs, entry })
+    let entry = if r.u8()? == 1 { Some(r.u32()?) } else { None };
+    let n_tests = r.u32()? as usize;
+    let mut tests = Vec::with_capacity(n_tests);
+    for _ in 0..n_tests {
+        let name = r.str()?;
+        let file = r.str()?;
+        let func = r.u32()?;
+        tests.push(TestMeta { name, file, func });
+    }
+    Ok(Module { strings, funcs, entry, tests })
 }
 
 // ------------------------------------------------------------ disassembler
@@ -232,13 +271,20 @@ fn rd_u32(code: &[u8], at: usize) -> u32 {
 
 pub fn disassemble(m: &Module) -> String {
     let mut out = String::new();
+    let entry = match m.entry {
+        Some(e) => m.funcs.get(e as usize).map(|f| f.name.as_str()).unwrap_or("?"),
+        None => "none (compiled for `binz test`)",
+    };
     out.push_str(&format!(
         "; binZ artifact v{}  ({} functions, {} strings, entry = {})\n",
         VERSION,
         m.funcs.len(),
         m.strings.len(),
-        m.funcs.get(m.entry as usize).map(|f| f.name.as_str()).unwrap_or("?")
+        entry
     ));
+    for t in &m.tests {
+        out.push_str(&format!("; test {} in {} -> #{}\n", t.name, t.file, t.func));
+    }
     for (i, s) in m.strings.iter().enumerate() {
         out.push_str(&format!("; str[{}] = {:?}\n", i, s));
     }
@@ -377,6 +423,11 @@ pub fn disassemble(m: &Module) -> String {
                 OP_NOT => "not".into(),
                 OP_POP => "pop".into(),
                 OP_RET => "ret".into(),
+                OP_STUB => {
+                    let v = rd_u32(code, pc);
+                    pc += 4;
+                    format!("stub #{}", v)
+                }
                 other => format!("<unknown 0x{:02x}>", other),
             };
             out.push_str(&format!("  {:>5}  {}\n", at, text));

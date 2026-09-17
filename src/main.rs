@@ -19,6 +19,7 @@ binZ 0.1.0 -- a small strongly typed compiled language
 usage:
   binz build <file.binz> [-o <out.binzc>]   compile to a bytecode artifact
   binz run   <file.binz>                    compile and run
+  binz test  <file.binz>                    run every `@test` it can reach
   binz exec  <file.binzc>                   run an artifact
   binz dump  <file.binzc>                   disassemble an artifact
 ";
@@ -27,6 +28,10 @@ usage:
 /// as one program. A diagnostic names the file its span belongs to, which is
 /// not always the one on the command line.
 fn compile_path(path: &str) -> bytecode::Module {
+    compile_mode(path, compiler::Mode::Run)
+}
+
+fn compile_mode(path: &str, mode: compiler::Mode) -> bytecode::Module {
     // The file on the command line is the only one the shell is responsible
     // for, so a missing one is a usage error rather than a compile error.
     if let Err(e) = std::fs::metadata(path) {
@@ -42,7 +47,11 @@ fn compile_path(path: &str) -> bytecode::Module {
             exit(1);
         }
     };
-    match compiler::compile(&prog) {
+    let result = match mode {
+        compiler::Mode::Run => compiler::compile(&prog),
+        compiler::Mode::Test => compiler::compile_tests(&prog),
+    };
+    match result {
         Ok(m) => m,
         Err(e) => {
             let where_ = e.file.clone().unwrap_or_else(|| path.to_string());
@@ -77,6 +86,45 @@ fn run(m: &bytecode::Module) -> ! {
             eprintln!("{}", e);
             exit(101);
         }
+    }
+}
+
+/// Runs every `@test` of the graph, each in a virtual machine of its own, and
+/// reports them file by file. A test says what it has to say by failing, so
+/// the whole report is its name and, when it fails, the line that stopped it.
+fn run_tests(m: &bytecode::Module) -> i32 {
+    if m.tests.is_empty() {
+        println!("no `@test` functions here");
+        return 0;
+    }
+    println!("running {} test(s)\n", m.tests.len());
+    let mut failed = 0;
+    let mut file = "";
+    for t in &m.tests {
+        if t.file != file {
+            file = &t.file;
+            println!("{}", file);
+        }
+        match vm::Vm::run_test(m, t.func) {
+            Ok(()) => println!("  ok    {}", t.name),
+            Err(e) => {
+                failed += 1;
+                println!("  FAIL  {}", t.name);
+                // The function named by the error is the one that stopped,
+                // which is only the test itself when the test asserted.
+                if e.func == t.name {
+                    println!("        {}", e.msg);
+                } else {
+                    println!("        {} (in `{}`)", e.msg, e.func);
+                }
+            }
+        }
+    }
+    println!("\n{} passed, {} failed", m.tests.len() - failed, failed);
+    if failed > 0 {
+        1
+    } else {
+        0
     }
 }
 
@@ -115,6 +163,10 @@ fn main() {
         "run" => {
             let m = compile_path(&args[2]);
             run(&m);
+        }
+        "test" => {
+            let m = compile_mode(&args[2], compiler::Mode::Test);
+            exit(run_tests(&m));
         }
         "exec" => {
             let m = load_artifact(&args[2]);
