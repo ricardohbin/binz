@@ -9,7 +9,8 @@ and backend, emitting a `.binzc` bytecode artifact executed by a stack VM in
 `src/vm.rs`. Source files are `.binz`. Started 2026-09-10 from an empty
 directory; v0.1 works end to end, containers landed 2026-09-11, and `HashMap`,
 the standard library, `binz/map` and `SortedMap` all landed 2026-09-14, and
-local modules (`import @root/...`) on 2026-09-15.
+local modules (`import @root/...`) on 2026-09-15, and the test library
+(`@test`, `binz test`, `stub`) on 2026-09-17.
 
 **The one invariant: there is exactly ONE way to do one thing.** Every syntax
 question gets settled by that rule first, before taste. When proposing anything
@@ -86,13 +87,48 @@ does not go in.
   **This is the first camelCase name that is not a member**: modules, files
   and directories are one lowercase word, but a rename is two module names
   *joined*, and camelCase is how binZ joins words.
+- **Tests, 2026-09-17**: a test lives in the file it tests, tagged
+  `@test function sumsPositives(): void`, takes nothing and answers `void`.
+  **A test name may not start with `test`** — his rule, the tag already says
+  it. `binz test <file>` compiles that file *and everything it imports* and
+  runs every test in the graph; **`main` is neither required nor run**, so a
+  module is testable on its own. `binz build`/`binz run` **do not compile a
+  test at all**: it is not in the artifact and nothing can call one.
+  Asserting is `test.equal(actual, expected)` — the only assertion, since
+  `notEqual`/`assert`/`check` all overlap it — plus `test.fail(msg)` for what
+  equality cannot state, and `test.calls(math.add)` for how many times a
+  function ran. `binz/test` is reachable only from a test or stub body.
+- **`stub`, 2026-09-17 — mocking with no interfaces and no DI.** His ask;
+  the answer was already in the VM, because every call is `OP_PUSH_FN <id>` +
+  `OP_CALL` and so dispatches by function id. `stub rates.lookup(country:
+  str): f64 { ... }` at the **top of a test** replaces the *function*, not
+  the call: every path that reaches it lands in the stub, however deep in the
+  import graph. One `OP_STUB` and a redirect table allocated only when used.
+  Rules, each earning its keep: stubs come first in the test body (no
+  temporal rule); the **signature is written out and must match** (a drifted
+  stub is the one bug a test lib must not hide); one function one stub;
+  **a module of this project only** — never `binz/io`; **a stub cannot call
+  what it replaces** (it would land back in the stub). Counting exists
+  because binZ has no globals and no closures, so a stub body **cannot
+  record anything**. Each test runs in a fresh VM, so a stub dies with it.
+  Artifact `VERSION` 3 -> 4: `Module.entry` is now optional and the module
+  carries its test table. Rationale in `memory/2026-09-17.md`.
+- **`binz/random`, 2026-09-17 — his call over putting it on `int`/`float`.**
+  A member is named for the type it answers: `random.f64()` in `[0, 1)` and
+  `random.i32(lo, hi)` with **both ends included**, so `random.i32(1, 6)` is a
+  die; a backwards range traps. **Seeded from the OS per process, with no way
+  to set the seed** — code that must be predictable stubs the module function
+  that reads a random number rather than replaying one. xorshift64* in a
+  `Cell` on the VM, the only stdlib member with state, seeded through
+  `RandomState` so binZ still has no dependencies; the range comes from the
+  **high** bits, since the low ones repeated across runs.
 - **Standard library, 2026-09-14**: `import binz/io;` and every member is
   reached as `io.print`. The binding is the last path segment, **always** —
   no alias, no wildcard, no bare import — so two modules may both define
   `find` and there is no resolution rule to learn. An import owns its binding for the
   whole *file* (nothing else in it may be named `io`); imports come first in
   a file.
-  Modules: `io` `string` `int` `float` `container` `map`. **Naming, his call
+  Modules: `io` `string` `int` `float` `container` `map` `random` `test`. **Naming, his call
   2026-09-14: modules lowercase, members `camelCase` (`startsWith`,
   `canParse`), types `PascalCase`** — a test in `src/stdlib.rs` enforces it.
   **`size`, `find` and
@@ -120,6 +156,10 @@ does not go in.
   randomised operations in `src/obj.rs`. Rationale in `memory/2026-09-14.md`.
 
 ## Resolved, previously flagged
+
+- **A module could not be run on its own to test it** (flagged 2026-09-15) —
+  gone 2026-09-17: `binz test` needs no `main`, so `binz test math.binz`
+  works.
 
 - **No user modules** (flagged 2026-09-14) — done 2026-09-15, see above. That
   is also when **`binz/` started paying for itself**: `binz/...` and
@@ -171,6 +211,19 @@ does not go in.
   `b/x/format`) both derive `xFormat` and collide, reported as a plain
   "already imported". Rare; the fixes are a longer prefix (non-local) or a
   dedicated diagnostic. Flagged 2026-09-15.
+- **A test is not type checked by `binz build`/`binz run`**, since neither
+  compiles one. The price of a test weighing nothing in the artifact, but a
+  stale test stays invisible until `binz test` runs. Flagged 2026-09-17.
+- **The standard library cannot be stubbed**, so `io.print` output cannot be
+  captured in a test. Natives are not bytecode functions and would need a
+  second redirect table. The likeliest next ask. Flagged 2026-09-17.
+- **A function of the file under test cannot be stubbed** — only a module's.
+  Flagged 2026-09-17.
+- **No setup, teardown or filter**: `binz test <file>` runs everything it can
+  reach, and there is no way to run one test. Flagged 2026-09-17.
+- **`import binz/test;` reserves `test` in the file**, the same bite as `map`.
+- **`test.calls` counts every call to the function**, including the ones the
+  module makes to itself. Flagged 2026-09-17.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
 - `.binzc` artifact extension was my extrapolation from his `.binz` request.
 
@@ -179,7 +232,9 @@ does not go in.
 Slices, closures, user-written generics, **exported types** (a module exports
 its functions only), methods, enums, bitwise ops, unsigned ints.
 The stdlib is a scratch: `io` has only `print` — no input, no stderr, no
-files, no time, no random. `cast<str>` still formats
+files, no time. `binz/random` cannot be seeded, so a failing random case
+cannot be replayed. A test run has no setup, teardown or filter, and cannot
+stub the standard library. `cast<str>` still formats
 scalars only, so a container is printed by iterating it. Heap containers
 cannot hold structs and their elements have no address. Pointer lifetimes are
 C-like, not borrow-checked — dangling pointers trap at runtime but are not

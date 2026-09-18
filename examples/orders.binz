@@ -1,0 +1,63 @@
+import binz/test;
+import @root/modules/rates.binz;
+
+// A test lives in the file it tests, tagged `@test`, and `binz test` is the
+// only thing that runs one. `binz build` and `binz run` do not compile a test
+// at all, so nothing here weighs anything in the artifact.
+//
+// There is no `main` here: a test run needs no program, which is what lets a
+// file be tested on its own.
+
+function total(amount: f64, country: str): f64 {
+    return amount * rates.lookup(country);
+}
+
+function discounted(amount: f64, country: str): f64 {
+    const full: f64 = total(amount, country);
+    if (full > 100.0) {
+        return full - 10.0;
+    }
+    return full;
+}
+
+// `stub` replaces the module's function for the length of this test, wherever
+// it is called from -- `discounted` calls `total`, which calls `rates.lookup`,
+// and nothing had to be passed down to reach it. Without that, none of these
+// could be written at all: the real rate is random.
+@test function takesTenOffALargeOrder(): void {
+    stub rates.lookup(country: str): f64 { return 1.0; }
+
+    test.equal(discounted(200.0, "br"), 190.0);
+}
+
+@test function leavesASmallOrderAlone(): void {
+    stub rates.lookup(country: str): f64 { return 1.0; }
+
+    test.equal(discounted(50.0, "br"), 50.0);
+}
+
+// A stub cannot record anything -- binZ has no globals and no closures -- so
+// the library counts calls, and the count is asserted like any other value.
+@test function readsTheRateOnce(): void {
+    stub rates.lookup(country: str): f64 { return 1.0; }
+
+    test.equal(discounted(200.0, "br"), 190.0);
+    test.equal(test.calls(rates.lookup), 1);
+}
+
+// No stub, and this is all that is left: the real rate is a random fraction,
+// so the value cannot be named -- only bounded. That is what stubbing buys.
+@test function withoutAStubOnlyTheBoundsHold(): void {
+    const full: f64 = total(100.0, "br");
+
+    test.equal(full >= 0.0 && full < 100.0, true);
+}
+
+// For the case equality cannot state: a branch that should not be reached.
+@test function neverDiscountsASmallOrder(): void {
+    stub rates.lookup(country: str): f64 { return 0.1; }
+
+    if (discounted(50.0, "br") < 5.0) {
+        test.fail("a small order must not be discounted");
+    }
+}

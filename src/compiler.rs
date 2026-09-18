@@ -45,6 +45,34 @@ struct FileScope {
     mod_imports: Vec<(String, usize)>,
     struct_ids: HashMap<String, usize>,
     fn_ids: HashMap<String, usize>,
+    /// `@test` functions, in source order, with the function id they were
+    /// given. They are deliberately *not* in `fn_ids`: a test is run by
+    /// `binz test` and can be called by nothing, which is what lets
+    /// `binz build` leave it out of the artifact.
+    test_ids: Vec<(String, usize)>,
+    /// The name of every test in the file, recorded even by `binz run`,
+    /// which does not compile one -- so a call to a test is answered with
+    /// what a test is, in either mode.
+    test_names: Vec<String>,
+}
+
+/// What the program is being compiled for. The only difference is whether
+/// `@test` functions exist at all: `binz build` and `binz run` never emit
+/// one, so a test cannot be reached from, or weigh anything in, a program.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Run,
+    Test,
+}
+
+/// Which of the three kinds of function body is being compiled. Only the
+/// first two may call `binz/test`, and only a test body may open with a
+/// `stub`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FnKind {
+    Plain,
+    Test,
+    StubBody,
 }
 
 /// A qualified name's left-hand side: `io` in `io.print`, `math` in
@@ -62,10 +90,20 @@ pub struct Compiler {
     displays: Vec<String>,
     /// The file being compiled right now.
     cur: usize,
+    mode: Mode,
     structs: Vec<StructInfo>,
     sigs: Vec<FnSig>,
     strings: Vec<String>,
     string_ids: HashMap<String, u32>,
+    /// The function id of each stub, by `(test function id, position in the
+    /// test)`. Declared with the functions, because a stub body is an
+    /// ordinary function once it has an id.
+    stub_ids: HashMap<(usize, usize), usize>,
+    /// Every `@test` of the program, in the order `binz test` reports them.
+    tests: Vec<TestMeta>,
+    /// What each stub replaces, by stub function id -- so a stub body can be
+    /// stopped from calling the function it is standing in for.
+    stub_targets: HashMap<usize, usize>,
 
     // state of the function currently being compiled
     code: Vec<u8>,
@@ -74,10 +112,48 @@ pub struct Compiler {
     max_slots: u32,
     cur_ret: Type,
     cur_sret: bool,
+    /// The `@test` function being compiled, if any, and how many stubs of it
+    /// have been compiled so far.
+    cur_test: Option<usize>,
+    stub_n: usize,
+    /// Whether a `stub` is still legal here: true at the top of a test body,
+    /// false from its first ordinary statement onwards.
+    stub_ok: bool,
+    /// Targets already stubbed in this test, so one function cannot be
+    /// stubbed twice and leave a reader guessing which body wins.
+    cur_stubs: Vec<usize>,
+    /// True inside a test body or a stub body -- the only places `binz/test`
+    /// may be called, since nowhere else would ever run them.
+    in_test_code: bool,
+    /// The function the stub body being compiled replaces, if one is.
+    stub_target: Option<usize>,
 }
 
+/// Compiles a program: `main` is required, and `@test` functions are left
+/// out entirely.
 pub fn compile(prog: &Program) -> CResult<Module> {
+    compile_with(prog, Mode::Run)
+}
+
+/// Compiles the same graph for `binz test`: every `@test` of every file is
+/// emitted, and `main` is neither required nor run -- which is what lets a
+/// module be tested on its own.
+pub fn compile_tests(prog: &Program) -> CResult<Module> {
+    compile_with(prog, Mode::Test)
+}
+
+fn compile_with(prog: &Program, mode: Mode) -> CResult<Module> {
     let mut c = Compiler {
+        mode,
+        stub_ids: HashMap::new(),
+        tests: Vec::new(),
+        stub_targets: HashMap::new(),
+        cur_test: None,
+        stub_n: 0,
+        stub_ok: false,
+        cur_stubs: Vec::new(),
+        in_test_code: false,
+        stub_target: None,
         files: prog.files.iter().map(|_| FileScope::default()).collect(),
         displays: prog.files.iter().map(|f| f.display.clone()).collect(),
         cur: prog.entry,
@@ -126,8 +202,12 @@ impl Compiler {
             }
         }
 
+        // A test run needs no program: `binz test` runs the tests of the
+        // file it is given and of everything that file imports, which is
+        // what lets a module be tested without a `main` to hang it on.
         let entry = match self.files[prog.entry].fn_ids.get("main") {
-            Some(i) => *i,
+            Some(i) => Some(*i),
+            None if self.mode == Mode::Test => None,
             None => {
                 return Err(CompileError::new(
                     "every program needs `function main(): i32`",
@@ -136,7 +216,7 @@ impl Compiler {
                 .at_file(&prog.files[prog.entry].path))
             }
         };
-        {
+        if let Some(entry) = entry {
             let m = &self.sigs[entry];
             if !m.params.is_empty() || m.ret != Type::I32 {
                 return Err(CompileError::new(
@@ -154,17 +234,43 @@ impl Compiler {
         for (i, f) in prog.files.iter().enumerate() {
             self.cur = i;
             for item in &f.items {
-                if let Item::Fn(fd) = item {
-                    let idx = self.files[i].fn_ids[&fd.name];
-                    funcs[idx] = Some(self.compile_fn(fd, idx).map_err(|e| e.at_file(&f.path))?);
-                }
+                let fd = match item {
+                    Item::Fn(fd) if !fd.is_test => fd,
+                    Item::Fn(fd) => {
+                        if self.mode == Mode::Run {
+                            continue;
+                        }
+                        let idx = self.test_id(i, &fd.name);
+                        funcs[idx] = Some(
+                            self.compile_fn(fd, idx, FnKind::Test)
+                                .map_err(|e| e.at_file(&f.path))?,
+                        );
+                        // A stub body is an ordinary function that nothing
+                        // can call by name; `OP_STUB` is what reaches it.
+                        for (n, sd) in stubs_of(fd).enumerate() {
+                            let sid = self.stub_ids[&(idx, n)];
+                            self.stub_target = self.stub_targets.get(&sid).copied();
+                            let def = stub_as_fn(sd);
+                            funcs[sid] = Some(
+                                self.compile_fn(&def, sid, FnKind::StubBody)
+                                    .map_err(|e| e.at_file(&f.path))?,
+                            );
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let idx = self.files[i].fn_ids[&fd.name];
+                funcs[idx] =
+                    Some(self.compile_fn(fd, idx, FnKind::Plain).map_err(|e| e.at_file(&f.path))?);
             }
         }
 
         Ok(Module {
             strings: std::mem::take(&mut self.strings),
             funcs: funcs.into_iter().map(|f| f.expect("every signature got a body")).collect(),
-            entry: entry as u32,
+            entry: entry.map(|e| e as u32),
+            tests: std::mem::take(&mut self.tests),
         })
     }
 
@@ -405,7 +511,9 @@ impl Compiler {
         for item in &f.items {
             if let Item::Fn(fd) = item {
                 self.check_free(&fd.name, fd.span, "the name of a function")?;
-                if self.files[self.cur].fn_ids.contains_key(&fd.name) {
+                if self.files[self.cur].fn_ids.contains_key(&fd.name)
+                    || self.files[self.cur].test_names.contains(&fd.name)
+                {
                     return Err(CompileError::new(
                         format!("function `{}` is already defined", fd.name),
                         fd.span,
@@ -416,6 +524,16 @@ impl Compiler {
                         format!("`{}` is already the name of a struct", fd.name),
                         fd.span,
                     ));
+                }
+                if fd.is_test {
+                    self.files[self.cur].test_names.push(fd.name.clone());
+                    // A test is not a name a program can reach, so outside
+                    // `binz test` it is left out of the artifact entirely --
+                    // body, signature and all.
+                    if self.mode == Mode::Test {
+                        self.declare_test(f, fd)?;
+                    }
+                    continue;
                 }
                 let mut params = Vec::new();
                 for p in &fd.params {
@@ -435,6 +553,85 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// A `@test` function and the stubs written at the top of it. A test
+    /// takes nothing and answers nothing: what it has to say, it says by
+    /// failing, so there is no result for a caller to read -- and no caller.
+    fn declare_test(&mut self, f: &SourceFile, fd: &FnDef) -> CResult<()> {
+        if fd.name == "main" {
+            return Err(CompileError::new(
+                "`main` is the program, so it cannot also be a test",
+                fd.span,
+            ));
+        }
+        if !fd.params.is_empty() {
+            return Err(CompileError::new(
+                format!(
+                    "a test takes no arguments: `binz test` is what calls `{}`, and it has \
+                     nothing to pass",
+                    fd.name
+                ),
+                fd.params[0].span,
+            ));
+        }
+        let ret = self.resolve_type(&fd.ret)?;
+        if ret != Type::Void {
+            return Err(CompileError::new(
+                format!(
+                    "a test answers `void`: `{}` reports by failing, and nothing reads a \
+                     returned value",
+                    fd.name
+                ),
+                fd.ret.span(),
+            ));
+        }
+        let id = self.sigs.len();
+        self.sigs.push(FnSig {
+            name: fd.name.clone(),
+            params: Vec::new(),
+            ret: Type::Void,
+            span: fd.span,
+        });
+        self.files[self.cur].test_ids.push((fd.name.clone(), id));
+        self.tests.push(TestMeta {
+            name: fd.name.clone(),
+            file: f.display.clone(),
+            func: id as u32,
+        });
+
+        for (n, sd) in stubs_of(fd).enumerate() {
+            let mut params = Vec::new();
+            for p in &sd.params {
+                let ty = self.resolve_type(&p.ty)?;
+                if ty == Type::Void {
+                    return Err(CompileError::new(
+                        "a parameter cannot have type `void`",
+                        p.ty.span(),
+                    ));
+                }
+                params.push(ty);
+            }
+            let ret = self.resolve_type(&sd.ret)?;
+            let sid = self.sigs.len();
+            self.sigs.push(FnSig {
+                name: format!("stub {}.{}", sd.module, sd.member),
+                params,
+                ret,
+                span: sd.span,
+            });
+            self.stub_ids.insert((id, n), sid);
+        }
+        Ok(())
+    }
+
+    fn test_id(&self, file: usize, name: &str) -> usize {
+        self.files[file]
+            .test_ids
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, i)| *i)
+            .expect("every test was declared")
     }
 
     // ------------------------------------------------------------- types
@@ -718,8 +915,18 @@ impl Compiler {
 
     // ---------------------------------------------------------- functions
 
-    fn compile_fn(&mut self, def: &FnDef, idx: usize) -> CResult<FnMeta> {
+    fn compile_fn(&mut self, def: &FnDef, idx: usize, kind: FnKind) -> CResult<FnMeta> {
         let sig = self.sigs[idx].clone();
+        self.cur_test = if kind == FnKind::Test { Some(idx) } else { None };
+        self.stub_n = 0;
+        self.cur_stubs.clear();
+        // A stub replaces a function for the whole test, so it is written
+        // where that is plain to read: at the top, before anything runs.
+        self.stub_ok = kind == FnKind::Test;
+        self.in_test_code = kind != FnKind::Plain;
+        if kind != FnKind::StubBody {
+            self.stub_target = None;
+        }
         self.code = Vec::new();
         self.scopes = vec![Vec::new()];
         self.next_slot = 0;
@@ -778,6 +985,12 @@ impl Compiler {
     // --------------------------------------------------------- statements
 
     fn compile_stmt(&mut self, s: &Stmt) -> CResult<()> {
+        if let Stmt::Stub(sd) = s {
+            return self.compile_stub(sd);
+        }
+        // Everything else closes the prelude: from here on a `stub` would be
+        // replacing a function some of the test has already called.
+        self.stub_ok = false;
         match s {
             Stmt::Let { mutable, name, ty, init, span } => {
                 let declared = self.resolve_type(ty)?;
@@ -951,6 +1164,7 @@ impl Compiler {
                 self.patch_jump(exit);
             }
 
+            Stmt::Stub(_) => unreachable!("a stub is handled before this match"),
             Stmt::Nested(b, _) => self.compile_block(b)?,
         }
         Ok(())
@@ -1133,6 +1347,16 @@ impl Compiler {
                     let sig = self.sigs[*idx].clone();
                     self.emit_op_u32(OP_PUSH_FN, *idx as u32);
                     return Ok(Type::Fn(sig.params, Box::new(sig.ret)));
+                }
+                if self.files[self.cur].test_names.contains(name) {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is an `@test` function; a test is run by `binz test`, and \
+                             nothing else can call one",
+                            name
+                        ),
+                        *span,
+                    ));
                 }
                 if let Some(e) = stdlib_hint(name, *span) {
                     return Err(e);
@@ -1671,6 +1895,9 @@ impl Compiler {
         if module == "int" {
             return self.compile_int_form(member, id, args, span);
         }
+        if module == "test" {
+            return self.compile_test_form(member, id, args, span);
+        }
         let ct = self.compile_expr(&args[0], None)?;
 
         // A map is not a container. It is reached only by key, and every
@@ -1856,6 +2083,28 @@ impl Compiler {
     /// lookup in that file's own scope -- and the result is an ordinary
     /// function value, exactly as a bare `add` would be inside `math.binz`.
     fn local_member(&mut self, file: usize, name: &str, span: Span) -> CResult<Type> {
+        let idx = self.local_fn_id(file, name, span)?;
+        // A stub replaces the function itself, so a call to it from inside
+        // the stub lands back in the stub. There is no calling through.
+        if self.stub_target == Some(idx) {
+            return Err(CompileError::new(
+                format!(
+                    "a stub cannot reach `{}`: it replaced that function, so this would \
+                     land back in the stub",
+                    name
+                ),
+                span,
+            ));
+        }
+        let sig = self.sigs[idx].clone();
+        self.emit_op_u32(OP_PUSH_FN, idx as u32);
+        Ok(Type::Fn(sig.params, Box::new(sig.ret)))
+    }
+
+    /// The function id behind `math.add`, with the reasons a module might not
+    /// be able to hand it over. Shared by a call and by a `stub`, which name
+    /// a module member the same way.
+    fn local_fn_id(&mut self, file: usize, name: &str, span: Span) -> CResult<usize> {
         let binding = self.files[self.cur]
             .mod_imports
             .iter()
@@ -1868,6 +2117,12 @@ impl Compiler {
                 let what = if self.files[file].struct_ids.contains_key(name) {
                     format!(
                         "`{}` is a struct in `{}`, and a module exports its functions, not its types",
+                        name, self.displays[file]
+                    )
+                } else if self.files[file].test_names.contains(&name.to_string()) {
+                    format!(
+                        "`{}` is an `@test` function of `{}`; a test is run by `binz test` \
+                         and exported to nobody",
                         name, self.displays[file]
                     )
                 } else {
@@ -1895,8 +2150,187 @@ impl Compiler {
                 ));
             }
         }
-        self.emit_op_u32(OP_PUSH_FN, idx as u32);
-        Ok(Type::Fn(sig.params, Box::new(sig.ret)))
+        Ok(idx)
+    }
+
+    /// `binz/test` is reachable from a test body and from a stub body, and
+    /// from nowhere else: a program never runs one of these, and `binz run`
+    /// does not even compile the functions that do.
+    fn check_test_context(&self, name: &str, span: Span) -> CResult<()> {
+        if self.in_test_code {
+            return Ok(());
+        }
+        Err(CompileError::new(
+            format!(
+                "`test.{}` is only reached from an `@test` function: it answers to the test \
+                 that is running, and outside one there is none",
+                name
+            ),
+            span,
+        ))
+    }
+
+    /// `test.equal(actual, expected)` and `test.calls(math.add)` -- the whole
+    /// of `binz/test` that is generic. `equal` takes whatever `==` takes,
+    /// which is why it is a form and not a native.
+    fn compile_test_form(
+        &mut self,
+        member: &str,
+        id: u8,
+        args: &[Expr],
+        _span: Span,
+    ) -> CResult<Type> {
+        if id == B_TEST_CALLS {
+            // A standard library call is not counted: `io.print` is not a
+            // function of the program, so there is no id to count it under.
+            if let Expr::Field { base, name, .. } = &args[0] {
+                if let Some(ModRef::Std(m)) = self.module_base(base)? {
+                    return Err(CompileError::new(
+                        format!(
+                            "`test.calls` counts calls to a function of this program; \
+                             `{}.{}` is the standard library",
+                            m, name
+                        ),
+                        args[0].span(),
+                    ));
+                }
+            }
+            let t = self.compile_expr(&args[0], None)?;
+            if !matches!(t, Type::Fn(..)) {
+                return Err(CompileError::new(
+                    format!(
+                        "`test.calls` counts a function, and `{}` is a `{}`",
+                        member,
+                        self.tn(&t)
+                    ),
+                    args[0].span(),
+                ));
+            }
+            self.emit(OP_BUILTIN);
+            self.emit(B_TEST_CALLS);
+            return Ok(Type::I32);
+        }
+
+        // `test.equal` compares what `==` compares, and prints both sides
+        // with the one formatter binZ has, `cast<str>`.
+        let actual = self.compile_expr(&args[0], None)?;
+        let ok = actual.is_numeric() || matches!(actual, Type::Bool | Type::Str | Type::Ptr(_));
+        if !ok {
+            return Err(CompileError::new(
+                format!(
+                    "`test.equal` compares what `==` compares, and `{}` is not one of \
+                     those; compare the parts of it instead",
+                    self.tn(&actual)
+                ),
+                args[0].span(),
+            ));
+        }
+        let expected = self.compile_expr(&args[1], Some(&actual))?;
+        self.expect_type(&actual, &expected, args[1].span(), "in the expected value")?;
+        self.emit(OP_BUILTIN);
+        self.emit(B_TEST_EQUAL);
+        Ok(Type::Void)
+    }
+
+    /// `stub math.add(a: i32, b: i32): i32 { ... }`.
+    ///
+    /// A stub replaces the *function*, not the call: every path that reaches
+    /// `math.add` for the rest of this test lands in the body written here,
+    /// however deep in the import graph the call was written. That is what
+    /// buys mocking without passing anything in -- no interface, no argument
+    /// threaded through three layers to reach the one place that lies.
+    fn compile_stub(&mut self, sd: &StubDef) -> CResult<()> {
+        let test = match self.cur_test {
+            Some(t) => t,
+            None => {
+                return Err(CompileError::new(
+                    "a `stub` belongs at the top of an `@test` function: it replaces a \
+                     function for the length of one test, and outside a test there is no \
+                     length to replace it for",
+                    sd.span,
+                ))
+            }
+        };
+        if !self.stub_ok {
+            return Err(CompileError::new(
+                "every `stub` goes at the top of the test, before its first statement, so \
+                 what the test replaced is read once and holds for all of it",
+                sd.span,
+            ));
+        }
+
+        let base = Expr::Ident(sd.module.clone(), sd.target_span);
+        let file = match self.module_base(&base)? {
+            Some(ModRef::Local(f)) => f,
+            Some(ModRef::Std(m)) => {
+                return Err(CompileError::new(
+                    format!(
+                        "`binz/{}` is the standard library, and a stub replaces a function \
+                         of a module of this project; `{}.{}` means the same thing in every \
+                         program and a test does not get to change that",
+                        m, m, sd.member
+                    ),
+                    sd.target_span,
+                ))
+            }
+            None => {
+                let hint = if self.files[self.cur].fn_ids.contains_key(&sd.module) {
+                    format!(
+                        "; `{}` is a function of this file, and a stub replaces a function \
+                         of a module this file imports",
+                        sd.module
+                    )
+                } else {
+                    String::new()
+                };
+                return Err(CompileError::new(
+                    format!("`{}` is not a module imported by this file{}", sd.module, hint),
+                    sd.target_span,
+                ));
+            }
+        };
+        let target = self.local_fn_id(file, &sd.member, sd.target_span)?;
+        if self.cur_stubs.contains(&target) {
+            return Err(CompileError::new(
+                format!(
+                    "`{}.{}` is already stubbed in this test; one function, one replacement",
+                    sd.module, sd.member
+                ),
+                sd.target_span,
+            ));
+        }
+
+        // The signature is written out and has to match, because a stub that
+        // has drifted from the function it fakes is the one bug a test lib
+        // must not hide.
+        let id = self.stub_ids[&(test, self.stub_n)];
+        let stub = self.sigs[id].clone();
+        let real = self.sigs[target].clone();
+        if stub.params != real.params || stub.ret != real.ret {
+            return Err(CompileError::new(
+                format!(
+                    "this stub does not have the signature of `{}.{}`, which is `{}`",
+                    sd.module,
+                    sd.member,
+                    self.sig_text(&sd.member, &real)
+                ),
+                sd.span,
+            ));
+        }
+
+        self.stub_n += 1;
+        self.cur_stubs.push(target);
+        self.stub_targets.insert(id, target);
+        self.emit_op_u32(OP_PUSH_FN, id as u32);
+        self.emit_op_u32(OP_STUB, target as u32);
+        Ok(())
+    }
+
+    /// A signature as it is written in source, for a diagnostic that wants to
+    /// show the one that was expected.
+    fn sig_text(&self, name: &str, sig: &FnSig) -> String {
+        let params: Vec<String> = sig.params.iter().map(|t| self.tn(t)).collect();
+        format!("function {}({}): {}", name, params.join(", "), self.tn(&sig.ret))
     }
 
     fn no_member(&self, module: &str, name: &str, span: Span) -> CompileError {
@@ -1927,6 +2361,9 @@ impl Compiler {
     /// A stdlib member used as a value. It is one exactly when its type can
     /// be written down in binZ; the generic ones have to be called.
     fn compile_module_value(&mut self, module: &str, name: &str, span: Span) -> CResult<Type> {
+        if module == "test" {
+            self.check_test_context(name, span)?;
+        }
         if let Some((idx, ty)) = stdlib::find_native(module, name) {
             self.emit_op_u32(OP_PUSH_NATIVE, idx);
             return Ok(ty);
@@ -1950,6 +2387,9 @@ impl Compiler {
         args: &[Expr],
         span: Span,
     ) -> CResult<Type> {
+        if module == "test" {
+            self.check_test_context(name, span)?;
+        }
         if let Some(form) = stdlib::find_form(module, name) {
             return self.compile_form(module, name, form.id, form.arity, args, span);
         }
@@ -2089,6 +2529,29 @@ fn contested_names(f: &SourceFile) -> Vec<(String, Vec<String>)> {
 }
 
 /// The `main` of a file, if it has one.
+/// The stubs of a test, in source order. They sit at the top of the body,
+/// which the compiler enforces -- so this walk and the one that compiles
+/// them see the same stubs in the same order.
+fn stubs_of(fd: &FnDef) -> impl Iterator<Item = &StubDef> {
+    fd.body.stmts.iter().filter_map(|s| match s {
+        Stmt::Stub(sd) => Some(sd),
+        _ => None,
+    })
+}
+
+/// A stub body as the ordinary function it becomes. Nothing can call it by
+/// name -- `OP_STUB` is the only thing that reaches it.
+fn stub_as_fn(sd: &StubDef) -> FnDef {
+    FnDef {
+        name: format!("stub {}.{}", sd.module, sd.member),
+        params: sd.params.clone(),
+        ret: sd.ret.clone(),
+        body: sd.body.clone(),
+        span: sd.span,
+        is_test: false,
+    }
+}
+
 fn fn_named<'a>(f: &'a SourceFile, name: &str) -> Option<&'a FnDef> {
     f.items.iter().find_map(|i| match i {
         Item::Fn(fd) if fd.name == name => Some(fd),
@@ -2116,6 +2579,7 @@ fn stmt_returns(s: &Stmt) -> bool {
     match s {
         Stmt::Return(..) => true,
         Stmt::Nested(b, _) => block_returns(b),
+        Stmt::Stub(_) => false,
         Stmt::If { then, els: Some(e), .. } => block_returns(then) && block_returns(e),
         _ => false,
     }

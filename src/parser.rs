@@ -74,7 +74,8 @@ impl Parser {
         while self.peek() != &Tok::Eof {
             match self.peek() {
                 Tok::Struct => items.push(Item::Struct(self.parse_struct()?)),
-                Tok::Function => items.push(Item::Fn(self.parse_fn()?)),
+                Tok::Function => items.push(Item::Fn(self.parse_fn(false)?)),
+                Tok::At => items.push(Item::Fn(self.parse_tagged_fn()?)),
                 Tok::Import => {
                     return Err(CompileError::new(
                         "every `import` goes at the top of the file, before the first `struct` or `function`",
@@ -99,6 +100,35 @@ impl Parser {
             }
         }
         Ok(items)
+    }
+
+    /// `@test function sumsTwoPositives(): void { ... }`. The tag is the one
+    /// thing that marks a test, which is why the name may not repeat it.
+    fn parse_tagged_fn(&mut self) -> CResult<FnDef> {
+        let at = self.span();
+        self.expect(Tok::At)?;
+        let (tag, tspan) = self.ident()?;
+        if tag != "test" {
+            return Err(CompileError::new(
+                format!("`@{}` is not a tag; `@test` is the only one", tag),
+                tspan,
+            ));
+        }
+        if self.peek() == &Tok::Struct {
+            return Err(CompileError::new(
+                "`@test` tags a function, not a struct",
+                self.span(),
+            ));
+        }
+        if self.peek() != &Tok::Function {
+            return Err(CompileError::new(
+                format!("expected `function` after `@test`, found `{}`", describe(self.peek())),
+                self.span(),
+            ));
+        }
+        let mut fd = self.parse_fn(true)?;
+        fd.span = at;
+        Ok(fd)
     }
 
     /// `import binz/io;` or `import @root/utils/math.binz;` -- one module per
@@ -209,10 +239,24 @@ impl Parser {
         Ok(StructDef { name, fields, span })
     }
 
-    fn parse_fn(&mut self) -> CResult<FnDef> {
+    fn parse_fn(&mut self, is_test: bool) -> CResult<FnDef> {
         let span = self.span();
         self.expect(Tok::Function)?;
-        let (name, _) = self.ident()?;
+        let (name, nspan) = self.ident()?;
+        if is_test {
+            check_test_name(&name, nspan)?;
+        }
+        let params = self.parse_params()?;
+        self.expect_return_colon()?;
+        let ret = self.parse_type()?;
+        let body = self.parse_block()?;
+        Ok(FnDef { name, params, ret, body, span, is_test })
+    }
+
+    /// `(a: i32, b: str)`, for a function and for the stub of one alike --
+    /// a stub writes the signature it fakes out in full, so it is the same
+    /// list.
+    fn parse_params(&mut self) -> CResult<Vec<Param>> {
         self.expect(Tok::LParen)?;
         let mut params = Vec::new();
         while self.peek() != &Tok::RParen {
@@ -225,10 +269,32 @@ impl Parser {
             }
         }
         self.expect(Tok::RParen)?;
+        Ok(params)
+    }
+
+    /// `stub math.add(a: i32, b: i32): i32 { ... }`. Where it may appear --
+    /// the top of an `@test` body, and nowhere else -- is the compiler's
+    /// business; the shape is this.
+    fn parse_stub(&mut self) -> CResult<StubDef> {
+        let span = self.span();
+        self.expect(Tok::Stub)?;
+        let (module, mspan) = self.ident()?;
+        if self.peek() != &Tok::Dot {
+            return Err(CompileError::new(
+                format!(
+                    "a stub names a function of an imported module, as in `stub {}.<function>(...)`",
+                    module
+                ),
+                self.span(),
+            ));
+        }
+        self.expect(Tok::Dot)?;
+        let (member, _) = self.ident()?;
+        let params = self.parse_params()?;
         self.expect_return_colon()?;
         let ret = self.parse_type()?;
         let body = self.parse_block()?;
-        Ok(FnDef { name, params, ret, body, span })
+        Ok(StubDef { module, member, params, ret, body, target_span: mspan, span })
     }
 
     /// A return type is introduced by `:`, exactly like every other type
@@ -355,6 +421,7 @@ impl Parser {
     fn parse_stmt(&mut self) -> CResult<Stmt> {
         let span = self.span();
         match self.peek().clone() {
+            Tok::Stub => Ok(Stmt::Stub(self.parse_stub()?)),
             Tok::Const | Tok::Var => {
                 let mutable = self.peek() == &Tok::Var;
                 self.bump();
@@ -646,6 +713,7 @@ impl Stmt {
             | Stmt::If { span, .. }
             | Stmt::While { span, .. }
             | Stmt::Nested(_, span) => *span,
+            Stmt::Stub(sd) => sd.span,
         }
     }
 }
@@ -667,4 +735,32 @@ fn check_path_segment(seg: &str, span: Span) -> CResult<()> {
         ));
     }
     Ok(())
+}
+
+/// A test is named for what it asserts, and the `@test` tag already says it
+/// is a test -- so `testSumsPositives` says it twice, and one of the two has
+/// to go. The tag stays, because it is what the compiler reads.
+fn check_test_name(name: &str, span: Span) -> CResult<()> {
+    let head: String = name.chars().take(4).collect();
+    if !head.eq_ignore_ascii_case("test") {
+        return Ok(());
+    }
+    let rest = name[head.len()..].trim_start_matches('_');
+    let suggestion = match rest.chars().next() {
+        Some(c) => format!("{}{}", c.to_ascii_lowercase(), &rest[c.len_utf8()..]),
+        None => String::new(),
+    };
+    let instead = if suggestion.is_empty() {
+        "name it for what it asserts".to_string()
+    } else {
+        format!("write `{}`", suggestion)
+    };
+    Err(CompileError::new(
+        format!(
+            "a test name cannot start with `test`: the `@test` tag above it already \
+             says that, so {}",
+            instead
+        ),
+        span,
+    ))
 }

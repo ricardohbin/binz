@@ -21,6 +21,9 @@ pub enum Tok {
     Import,
     /// `as`: renames a module, and only ever inside an `import`.
     As,
+    /// `stub`: replaces an imported module's function, and only ever at the
+    /// top of an `@test` function.
+    Stub,
     /// Reserved so `fn` gets a pointed diagnostic instead of "unknown name".
     Fn,
     Struct,
@@ -89,6 +92,7 @@ pub fn describe(t: &Tok) -> String {
         Tok::Function => "function".into(),
         Tok::Import => "import".into(),
         Tok::As => "as".into(),
+        Tok::Stub => "stub".into(),
         Tok::Fn => "fn".into(),
         Tok::Struct => "struct".into(),
         Tok::Const => "const".into(),
@@ -220,6 +224,7 @@ impl Lexer {
                     "function" => Tok::Function,
                     "import" => Tok::Import,
                     "as" => Tok::As,
+                    "stub" => Tok::Stub,
                     "fn" => Tok::Fn,
                     "struct" => Tok::Struct,
                     "const" => Tok::Const,

@@ -3,6 +3,7 @@
 //! Two stacks: `mem` holds call frames and is byte-addressable at slot
 //! granularity (that is what a `*T` points at), `stack` holds operands.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::bytecode::*;
@@ -43,6 +44,15 @@ struct Frame {
     sret: usize,
 }
 
+/// A seed from the operating system, without a dependency: `RandomState` is
+/// what a `HashMap` uses to make itself unpredictable, and it is seeded per
+/// process by the platform. Forced odd, since xorshift is stuck on zero.
+fn os_seed() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish() | 1
+}
+
 pub fn format_f64(v: f64) -> String {
     let s = format!("{}", v);
     if v.is_finite() && !s.contains('.') && !s.contains('e') && !s.contains("NaN") {
@@ -56,6 +66,17 @@ pub struct Vm {
     mem: Vec<Value>,
     stack: Vec<Value>,
     frames: Vec<Frame>,
+    /// `redirect[f]` is the function calls of `f` land in. Empty until a
+    /// `stub` installs one, so an ordinary run pays nothing for stubs
+    /// existing -- and a test run pays one bounds-checked read per call.
+    redirect: Vec<u32>,
+    /// Calls made to each function, for `test.calls`. Empty outside a test
+    /// run, which is the flag that switches counting off.
+    counts: Vec<u32>,
+    /// `binz/random`'s state: xorshift64*, seeded once per run from the
+    /// operating system. A `Cell` because a native is handed `&self`, and
+    /// randomness is the only one of them that has state at all.
+    rng: Cell<u64>,
 }
 
 macro_rules! rt {
@@ -73,11 +94,37 @@ macro_rules! rt {
 
 impl Vm {
     pub fn run(m: &Module) -> Result<i32, RuntimeError> {
-        let mut vm = Vm { mem: Vec::new(), stack: Vec::new(), frames: Vec::new() };
-        let entry = m.entry as usize;
-        vm.mem.resize(m.funcs[entry].n_slots as usize, Value::Void);
-        vm.frames.push(Frame { func: entry, pc: 0, fp: 0, sret: 0 });
-        vm.exec(m)
+        let entry = match m.entry {
+            Some(e) => e as usize,
+            None => {
+                return Err(RuntimeError {
+                    msg: "this artifact has no `main`; it was compiled for `binz test`".into(),
+                    func: "?".into(),
+                })
+            }
+        };
+        Vm::start(m, entry, false).exec(m)
+    }
+
+    /// One `@test` function, in a virtual machine of its own: a test shares
+    /// no memory with the test before it, and the stubs it installed die
+    /// with it.
+    pub fn run_test(m: &Module, func: u32) -> Result<(), RuntimeError> {
+        Vm::start(m, func as usize, true).exec(m).map(|_| ())
+    }
+
+    fn start(m: &Module, func: usize, counting: bool) -> Vm {
+        let mut vm = Vm {
+            mem: Vec::new(),
+            stack: Vec::new(),
+            frames: Vec::new(),
+            redirect: Vec::new(),
+            counts: if counting { vec![0; m.funcs.len()] } else { Vec::new() },
+            rng: Cell::new(os_seed()),
+        };
+        vm.mem.resize(m.funcs[func].n_slots as usize, Value::Void);
+        vm.frames.push(Frame { func, pc: 0, fp: 0, sret: 0 });
+        vm
     }
 
     fn pop(&mut self) -> Value {
@@ -103,7 +150,7 @@ impl Vm {
             match op {
                 OP_PUSH_I32 | OP_PUSH_STR | OP_PUSH_FN | OP_PUSH_NATIVE | OP_LOAD_LOCAL
                 | OP_STORE_LOCAL | OP_ADDR_LOCAL | OP_FIELD | OP_COPY | OP_COPY_SRET | OP_CALL
-                | OP_JMP | OP_JMP_IF_FALSE | OP_JMP_IF_TRUE | OP_ARR_FIND => {
+                | OP_STUB | OP_JMP | OP_JMP_IF_FALSE | OP_JMP_IF_TRUE | OP_ARR_FIND => {
                     u32_operand =
                         u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
                     pc += 4;
@@ -312,6 +359,17 @@ impl Vm {
                     self.pop();
                 }
 
+                OP_STUB => {
+                    let with = match self.pop() {
+                        Value::Fn(i) => i,
+                        _ => rt!(self, m, "a stub must be a function"),
+                    };
+                    if self.redirect.is_empty() {
+                        self.redirect = (0..m.funcs.len() as u32).collect();
+                    }
+                    self.redirect[u32_operand as usize] = with;
+                }
+
                 OP_CAST => {
                     let a = self.pop();
                     let v = self.cast(u8_operand, a, m)?;
@@ -329,7 +387,18 @@ impl Vm {
                             let v = self.call_native(idx, &args, m)?;
                             self.stack.push(v);
                         }
-                        Value::Fn(idx) => {
+                        Value::Fn(called) => {
+                            if !self.counts.is_empty() {
+                                self.counts[called as usize] += 1;
+                            }
+                            // A stub replaces the function itself, not one
+                            // call of it, so this is where it takes effect:
+                            // every path into it is redirected, however deep
+                            // in the module graph the call was written.
+                            let idx = match self.redirect.get(called as usize) {
+                                Some(to) => *to,
+                                None => called,
+                            };
                             let meta = &m.funcs[idx as usize];
                             let fp = self.mem.len();
                             self.mem.resize(fp + meta.n_slots as usize, Value::Void);
@@ -409,6 +478,23 @@ impl Vm {
             B_SIZE => {
                 let c = self.pop();
                 Value::I32(obj::obj_len(&self.as_obj(c, m)?) as i32)
+            }
+            B_TEST_EQUAL => {
+                let expected = self.pop();
+                let actual = self.pop();
+                if !self.compare(OP_EQ, actual.clone(), expected.clone(), m)? {
+                    let a = self.show(actual, m)?;
+                    let e = self.show(expected, m)?;
+                    rt!(self, m, "expected `{}`, found `{}`", e, a);
+                }
+                Value::Void
+            }
+            B_TEST_CALLS => {
+                let f = self.pop();
+                match f {
+                    Value::Fn(i) => Value::I32(self.counts.get(i as usize).copied().unwrap_or(0) as i32),
+                    _ => rt!(self, m, "`test.calls` counts a function of a module"),
+                }
             }
             B_INT_ABS => {
                 let a = self.pop();
@@ -600,6 +686,32 @@ impl Vm {
                 _ => o.is_ge(),
             },
         })
+    }
+
+    /// xorshift64*, which is small, has no state to carry between calls but
+    /// its own word, and is far better than binZ needs.
+    fn next_u64(&self) -> u64 {
+        let mut x = self.rng.get();
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng.set(x);
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// The 53 bits an `f64` can hold exactly, so every value in `[0, 1)` is
+    /// equally likely and none is rounded to `1.0`.
+    fn next_f64(&self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// A value as a failed `test.equal` prints it -- which is exactly how
+    /// `cast<str>` prints it, since that is the one formatter binZ has.
+    fn show(&self, v: Value, m: &Module) -> Result<String, RuntimeError> {
+        match self.cast(CAST_STR, v, m)? {
+            Value::Str(s) => Ok((*s).clone()),
+            _ => Ok("?".to_string()),
+        }
     }
 
     fn cast(&self, kind: u8, v: Value, m: &Module) -> Result<Value, RuntimeError> {
@@ -808,6 +920,25 @@ impl Vm {
             25 => Value::F64(self.f64_arg(&args[0], m)?.sqrt()),
             26 => Value::F64(self.f64_arg(&args[0], m)?.powf(self.f64_arg(&args[1], m)?)),
             27 => Value::Bool(self.f64_arg(&args[0], m)?.is_nan()),
+
+            // -------------------------------------------------- random
+            28 => Value::F64(self.next_f64()),
+            29 => {
+                let lo = self.i32_arg(&args[0], m)?;
+                let hi = self.i32_arg(&args[1], m)?;
+                if lo > hi {
+                    rt!(self, m, "`random.i32` was given the empty range {}..{}", lo, hi);
+                }
+                // Both ends are included, so `random.i32(1, 6)` is a die.
+                // The range is taken from the *high* bits -- xorshift's low
+                // ones are its weakest, and this avoids modulo bias too.
+                let span = (hi as i64 - lo as i64 + 1) as u128;
+                let at = (self.next_u64() as u128 * span) >> 64;
+                Value::I32((lo as i64 + at as i64) as i32)
+            }
+
+            // ---------------------------------------------------- test
+            30 => rt!(self, m, "{}", self.str_arg(&args[0], m)?),
 
             _ => rt!(self, m, "unknown stdlib function #{}", idx),
         })

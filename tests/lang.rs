@@ -17,7 +17,8 @@ fn write_temp(name: &str, src: &str) -> std::path::PathBuf {
 /// so a test only has to say what it is about. The import rules themselves
 /// are exercised by `run_raw_err`, which writes its own file head.
 const PRELUDE: &str = "import binz/io;\nimport binz/string;\nimport binz/int;\n\
-                       import binz/float;\nimport binz/container;\nimport binz/map;\n";
+                       import binz/float;\nimport binz/container;\nimport binz/map;\n\
+                       import binz/random;\n";
 
 /// Runs a program, asserting it exits 0, and returns its stdout.
 fn run_ok(name: &str, src: &str) -> String {
@@ -84,6 +85,52 @@ fn run_project_err(name: &str, files: &[(&str, &str)]) -> String {
     assert!(!out.status.success(), "expected failure, program succeeded");
     String::from_utf8(out.stderr).unwrap()
 }
+
+/// `binz test` over a project, which is how a test run is always started:
+/// `@root` needs a real directory, and a stub needs a module to replace a
+/// function of.
+fn test_project(name: &str, files: &[(&str, &str)]) -> std::process::Output {
+    let path = write_project(name, files);
+    Command::new(env!("CARGO_BIN_EXE_binz")).arg("test").arg(&path).output().unwrap()
+}
+
+/// Runs the tests of a project, asserting every one of them passed, and
+/// returns the report.
+fn tests_pass(name: &str, files: &[(&str, &str)]) -> String {
+    let out = test_project(name, files);
+    let report = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "tests failed:\n{}\n{}",
+        report,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    report
+}
+
+/// Runs tests expected to fail -- either because one of them did, or because
+/// the program was rejected -- and returns stdout and stderr together, since
+/// a failed assertion is reported on one and a diagnostic on the other.
+fn tests_fail(name: &str, files: &[(&str, &str)]) -> String {
+    let out = test_project(name, files);
+    assert!(!out.status.success(), "expected a failure, the run succeeded");
+    format!(
+        "{}{}",
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap()
+    )
+}
+
+/// The module most of the test-library cases stub: one function, with a side
+/// effect loud enough that a stub that did not take is obvious.
+const RATES: (&str, &str) = (
+    "rates.binz",
+    "import binz/io;\n\
+     function lookup(country: str): f64 {\n\
+         io.print(\"the real rates module ran\");\n\
+         return 1.0;\n\
+     }\n",
+);
 
 fn in_main(body: &str) -> String {
     format!("function main(): i32 {{\n{}\nreturn 0;\n}}", body)
@@ -1522,3 +1569,641 @@ fn a_clash_is_per_file() {
 }
 
 
+
+// ------------------------------------------------------------- binz/test
+
+/// A test lives in the file it tests, is marked by `@test`, and says what it
+/// has to say by failing.
+#[test]
+fn a_test_passes_and_a_test_fails() {
+    let report = tests_fail(
+        "testbasics",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function double(n: i32): i32 { return n + n; }\n\
+             function main(): i32 { return 0; }\n\
+             @test function doublesPositives(): void {\n\
+                 test.equal(double(21), 42);\n\
+             }\n\
+             @test function doublesNegatives(): void {\n\
+                 test.equal(double(-1), 0);\n\
+             }\n",
+        )],
+    );
+    assert!(report.contains("ok    doublesPositives"), "{}", report);
+    assert!(report.contains("FAIL  doublesNegatives"), "{}", report);
+    assert!(report.contains("expected `0`, found `-2`"), "{}", report);
+    assert!(report.contains("1 passed, 1 failed"), "{}", report);
+}
+
+/// The `@test` tag is what marks a test, so the name may not say it again.
+#[test]
+fn a_test_is_not_named_test_anything() {
+    for name in ["testDoubles", "TestDoubles", "test_doubles"] {
+        let err = tests_fail(
+            "testnamed",
+            &[(
+                "main.binz",
+                &format!(
+                    "import binz/test;\n\
+                     function main(): i32 {{ return 0; }}\n\
+                     @test function {}(): void {{ test.equal(1, 1); }}\n",
+                    name
+                ),
+            )],
+        );
+        assert!(err.contains("a test name cannot start with `test`"), "{}: {}", name, err);
+    }
+}
+
+/// The whole point: a stub replaces the module's function wherever it is
+/// called from, so nothing has to be passed in to reach it.
+#[test]
+fn a_stub_replaces_a_module_function_everywhere() {
+    let report = tests_pass(
+        "stubreplaces",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function total(amount: f64, country: str): f64 {\n\
+                     return amount * rates.lookup(country);\n\
+                 }\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function appliesTheRate(): void {\n\
+                     stub rates.lookup(country: str): f64 { return 0.5; }\n\
+                     test.equal(total(100.0, \"br\"), 50.0);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(!report.contains("the real rates module ran"), "{}", report);
+    assert!(report.contains("1 passed, 0 failed"), "{}", report);
+}
+
+/// A stub dies with the test that installed it: the next one gets the real
+/// function back, because each test runs in a machine of its own.
+#[test]
+fn a_stub_ends_with_its_test() {
+    let report = tests_pass(
+        "stubscope",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function usesTheStub(): void {\n\
+                     stub rates.lookup(country: str): f64 { return 0.5; }\n\
+                     test.equal(rates.lookup(\"br\"), 0.5);\n\
+                 }\n\
+                 @test function usesTheRealThing(): void {\n\
+                     test.equal(rates.lookup(\"br\"), 1.0);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(report.contains("the real rates module ran"), "{}", report);
+    assert!(report.contains("2 passed"), "{}", report);
+}
+
+/// Without globals or closures a stub cannot record anything, so counting is
+/// the library's job -- and it is asserted with the same `test.equal`.
+#[test]
+fn calls_are_counted() {
+    let report = tests_pass(
+        "stubcalls",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function twice(country: str): f64 {\n\
+                     return rates.lookup(country) + rates.lookup(country);\n\
+                 }\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function callsTheModuleTwice(): void {\n\
+                     stub rates.lookup(country: str): f64 { return 1.0; }\n\
+                     test.equal(twice(\"br\"), 2.0);\n\
+                     test.equal(test.calls(rates.lookup), 2);\n\
+                 }\n\
+                 @test function countsNothingBeforeItRuns(): void {\n\
+                     stub rates.lookup(country: str): f64 { return 1.0; }\n\
+                     test.equal(test.calls(rates.lookup), 0);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(report.contains("2 passed"), "{}", report);
+}
+
+/// `binz test` runs the tests of the file it is given and of everything that
+/// file imports, so pointing at the entry runs the project.
+#[test]
+fn a_test_run_covers_the_whole_import_graph() {
+    let report = tests_pass(
+        "testgraph",
+        &[
+            (
+                "math.binz",
+                "import binz/test;\n\
+                 function double(n: i32): i32 { return n + n; }\n\
+                 @test function doublesPositives(): void { test.equal(double(2), 4); }\n",
+            ),
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/math.binz;\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function reachesTheModule(): void { test.equal(math.double(3), 6); }\n",
+            ),
+        ],
+    );
+    assert!(report.contains("doublesPositives"), "{}", report);
+    assert!(report.contains("reachesTheModule"), "{}", report);
+    assert!(report.contains("2 passed"), "{}", report);
+}
+
+/// A test run needs no program, which is what lets a module be tested on its
+/// own -- a module may not define `main` at all.
+#[test]
+fn a_module_is_tested_without_a_main() {
+    let dir = write_project(
+        "testmodulealone",
+        &[
+            (
+                "math.binz",
+                "import binz/test;\n\
+                 function double(n: i32): i32 { return n + n; }\n\
+                 @test function doublesPositives(): void { test.equal(double(2), 4); }\n",
+            ),
+            ("main.binz", "function main(): i32 { return 0; }\n"),
+        ],
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_binz"))
+        .arg("test")
+        .arg(dir.parent().unwrap().join("math.binz"))
+        .output()
+        .unwrap();
+    let report = String::from_utf8(out.stdout).unwrap();
+    assert!(out.status.success(), "{}{}", report, String::from_utf8_lossy(&out.stderr));
+    assert!(report.contains("1 passed"), "{}", report);
+}
+
+/// A test is not in the artifact a program is built from, so it cannot be
+/// called and weighs nothing.
+#[test]
+fn a_test_cannot_be_called() {
+    let same = run_project_err(
+        "testcallsame",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function main(): i32 { checksOne(); return 0; }\n\
+             @test function checksOne(): void { test.equal(1, 1); }\n",
+        )],
+    );
+    assert!(same.contains("is an `@test` function"), "{}", same);
+
+    let across = run_project_err(
+        "testcallmodule",
+        &[
+            (
+                "math.binz",
+                "import binz/test;\n\
+                 function double(n: i32): i32 { return n + n; }\n\
+                 @test function doublesPositives(): void { test.equal(double(2), 4); }\n",
+            ),
+            (
+                "main.binz",
+                "import @root/math.binz;\n\
+                 function main(): i32 { math.doublesPositives(); return 0; }\n",
+            ),
+        ],
+    );
+    assert!(across.contains("exported to nobody"), "{}", across);
+}
+
+/// `binz/test` answers to the test that is running, so outside one there is
+/// nothing for it to answer to.
+#[test]
+fn binz_test_is_reachable_only_from_a_test() {
+    let err = run_project_err(
+        "testoutside",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function main(): i32 { test.equal(1, 1); return 0; }\n",
+        )],
+    );
+    assert!(err.contains("only reached from an `@test` function"), "{}", err);
+}
+
+/// A stub replaces a function of this project. `io.print` means the same
+/// thing in every program, and a test does not get to change that.
+#[test]
+fn the_standard_library_is_not_stubbable() {
+    let err = tests_fail(
+        "stubstd",
+        &[(
+            "main.binz",
+            "import binz/io;\n\
+             import binz/test;\n\
+             function main(): i32 { return 0; }\n\
+             @test function printsNothing(): void {\n\
+                 stub io.print(s: str): void { return; }\n\
+                 test.equal(1, 1);\n\
+             }\n",
+        )],
+    );
+    assert!(err.contains("is the standard library"), "{}", err);
+}
+
+/// Every stub goes at the top of the test, so what a test replaced is read
+/// once rather than hunted for.
+#[test]
+fn a_stub_goes_at_the_top_of_its_test() {
+    let late = tests_fail(
+        "stublate",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function ratesAreFake(): void {\n\
+                     test.equal(1, 1);\n\
+                     stub rates.lookup(country: str): f64 { return 0.5; }\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(late.contains("goes at the top of the test"), "{}", late);
+
+    let outside = run_project_err(
+        "stuboutside",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import @root/rates.binz;\n\
+                 function main(): i32 {\n\
+                     stub rates.lookup(country: str): f64 { return 0.5; }\n\
+                     return 0;\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(outside.contains("belongs at the top of an `@test` function"), "{}", outside);
+}
+
+/// A stub that has drifted from the function it fakes is the one bug a test
+/// library must not hide, so the signature is written out and checked.
+#[test]
+fn a_stub_has_the_signature_of_what_it_replaces() {
+    let err = tests_fail(
+        "stubsig",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function ratesAreFake(): void {\n\
+                     stub rates.lookup(country: i32): f64 { return 0.5; }\n\
+                     test.equal(1, 1);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("does not have the signature of `rates.lookup`"), "{}", err);
+    assert!(err.contains("function lookup(str): f64"), "{}", err);
+}
+
+/// One function, one replacement.
+#[test]
+fn a_function_is_stubbed_once_per_test() {
+    let err = tests_fail(
+        "stubtwice",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function ratesAreFake(): void {\n\
+                     stub rates.lookup(country: str): f64 { return 0.5; }\n\
+                     stub rates.lookup(country: str): f64 { return 0.25; }\n\
+                     test.equal(1, 1);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("already stubbed in this test"), "{}", err);
+}
+
+/// `binz test` calls a test, and it has nothing to pass and nothing to read.
+#[test]
+fn a_test_takes_nothing_and_answers_void() {
+    let params = tests_fail(
+        "testparams",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function main(): i32 { return 0; }\n\
+             @test function checksOne(x: i32): void { test.equal(x, 1); }\n",
+        )],
+    );
+    assert!(params.contains("a test takes no arguments"), "{}", params);
+
+    let ret = tests_fail(
+        "testret",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function main(): i32 { return 0; }\n\
+             @test function checksOne(): i32 { test.equal(1, 1); return 0; }\n",
+        )],
+    );
+    assert!(ret.contains("a test answers `void`"), "{}", ret);
+}
+
+/// `test.equal` compares what `==` compares, and both sides are one type --
+/// binZ converts nothing on its own anywhere else either.
+#[test]
+fn test_equal_compares_one_type() {
+    let mixed = tests_fail(
+        "testequalmixed",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function main(): i32 { return 0; }\n\
+             @test function comparesAcrossWidths(): void {\n\
+                 const a: i64 = 1;\n\
+                 const b: i32 = 1;\n\
+                 test.equal(a, b);\n\
+             }\n",
+        )],
+    );
+    assert!(mixed.contains("expected `i64`"), "{}", mixed);
+
+    let container = tests_fail(
+        "testequalcontainer",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             import binz/container;\n\
+             function main(): i32 { return 0; }\n\
+             @test function comparesVectors(): void {\n\
+                 const v: Vector<i32> = Vector<i32>{ 1 };\n\
+                 test.equal(v, v);\n\
+             }\n",
+        )],
+    );
+    assert!(container.contains("compares what `==` compares"), "{}", container);
+}
+
+/// `test.calls` counts a function of the program: a standard library call is
+/// not one of the program's functions, so there is no id to count it under.
+#[test]
+fn a_standard_library_call_is_not_counted() {
+    let err = tests_fail(
+        "testcallsstd",
+        &[(
+            "main.binz",
+            "import binz/io;\n\
+             import binz/test;\n\
+             function main(): i32 { return 0; }\n\
+             @test function countsPrints(): void {\n\
+                 test.equal(test.calls(io.print), 0);\n\
+             }\n",
+        )],
+    );
+    assert!(err.contains("is the standard library"), "{}", err);
+}
+
+/// `@test` is the only tag there is.
+#[test]
+fn test_is_the_only_tag() {
+    let err = run_project_err(
+        "unknowntag",
+        &[(
+            "main.binz",
+            "function main(): i32 { return 0; }\n\
+             @bench function measuresIt(): void { return; }\n",
+        )],
+    );
+    assert!(err.contains("`@bench` is not a tag"), "{}", err);
+}
+
+/// A test and a function of the same file share one namespace, so one name
+/// still means one thing.
+#[test]
+fn a_test_cannot_take_a_functions_name() {
+    let err = run_project_err(
+        "testnameclash",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function work(): i32 { return 1; }\n\
+             @test function work(): void { test.equal(1, 1); }\n\
+             function main(): i32 { return work(); }\n",
+        )],
+    );
+    assert!(err.contains("`work` is already defined"), "{}", err);
+}
+
+/// `binz build` and `binz run` do not compile a test at all -- so a test that
+/// no longer compiles stops `binz test`, and nothing else. That is the cost
+/// of tests weighing nothing in the artifact.
+#[test]
+fn a_program_runs_with_a_broken_test() {
+    let out = run_project_ok(
+        "brokentest",
+        &[(
+            "main.binz",
+            "import binz/io;\n\
+             import binz/test;\n\
+             function main(): i32 { io.print(\"ran\"); return 0; }\n\
+             @test function checksSomethingGone(): void { test.equal(gone(), 1); }\n",
+        )],
+    );
+    assert_eq!(out, "ran\n");
+
+    let err = tests_fail(
+        "brokentestfails",
+        &[(
+            "main.binz",
+            "import binz/io;\n\
+             import binz/test;\n\
+             function main(): i32 { io.print(\"ran\"); return 0; }\n\
+             @test function checksSomethingGone(): void { test.equal(gone(), 1); }\n",
+        )],
+    );
+    assert!(err.contains("`gone` is not defined"), "{}", err);
+}
+
+/// The case equality cannot state: a branch that should not have been
+/// reached.
+#[test]
+fn a_test_can_fail_outright() {
+    let report = tests_fail(
+        "testfail",
+        &[(
+            "main.binz",
+            "import binz/test;\n\
+             function main(): i32 { return 0; }\n\
+             @test function refusesTheEmptyCase(): void {\n\
+                 test.fail(\"an empty country should never be looked up\");\n\
+             }\n",
+        )],
+    );
+    assert!(report.contains("an empty country should never be looked up"), "{}", report);
+}
+
+/// A stub replaces the function itself, so there is no calling through to the
+/// real one -- the call would land back in the stub, forever.
+#[test]
+fn a_stub_cannot_call_what_it_replaces() {
+    let err = tests_fail(
+        "stubrecurses",
+        &[
+            RATES,
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function main(): i32 { return 0; }\n\
+                 @test function ratesAreFake(): void {\n\
+                     stub rates.lookup(country: str): f64 {\n\
+                         return rates.lookup(country);\n\
+                     }\n\
+                     test.equal(1, 1);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(err.contains("a stub cannot reach `lookup`"), "{}", err);
+}
+
+// ----------------------------------------------------------- binz/random
+
+/// `random.f64()` answers `[0, 1)` -- never 1.0, since that is the half-open
+/// range every other language's random float agrees on.
+#[test]
+fn a_random_f64_is_a_fraction() {
+    let out = run_ok(
+        "randomf64",
+        &in_main(
+            r#"
+            var i: i32 = 0;
+            var lo: bool = true;
+            var hi: bool = true;
+            var same: i32 = 0;
+            const first: f64 = random.f64();
+            while (i < 5000) {
+                const r: f64 = random.f64();
+                if (r < 0.0) { lo = false; }
+                if (r >= 1.0) { hi = false; }
+                if (r == first) { same = same + 1; }
+                i = i + 1;
+            }
+            io.print(cast<str>(lo) + " " + cast<str>(hi) + " " + cast<str>(same < 5));
+        "#,
+        ),
+    );
+    assert_eq!(out, "true true true\n");
+}
+
+/// Both ends are included, so `random.i32(1, 6)` is a die -- and over enough
+/// throws every face turns up.
+#[test]
+fn a_random_i32_covers_its_range() {
+    let out = run_ok(
+        "randomi32",
+        &in_main(
+            r#"
+            var counts: Vector<i32> = Vector<i32>{ 0, 0, 0, 0, 0, 0 };
+            var i: i32 = 0;
+            while (i < 6000) {
+                const d: i32 = random.i32(1, 6);
+                counts[d - 1] = counts[d - 1] + 1;
+                i = i + 1;
+            }
+            var j: i32 = 0;
+            var every: bool = true;
+            while (j < 6) {
+                if (counts[j] < 500) { every = false; }
+                j = j + 1;
+            }
+            io.print(cast<str>(every) + " " + cast<str>(random.i32(4, 4)));
+        "#,
+        ),
+    );
+    assert_eq!(out, "true 4\n");
+}
+
+/// An empty range has no value to answer with, and binZ has no `null`.
+#[test]
+fn a_backwards_random_range_traps() {
+    let e = run_err("randomempty", &in_main("io.print(cast<str>(random.i32(6, 1)));"));
+    assert!(e.contains("empty range 6..1"), "{}", e);
+}
+
+/// Both members are monomorphic, so both are ordinary function values -- the
+/// same rule that makes `io.print` one.
+#[test]
+fn random_members_are_values() {
+    let out = run_ok(
+        "randomvalues",
+        &in_main(
+            r#"
+            const fraction: function(): f64 = random.f64;
+            const die: function(i32, i32): i32 = random.i32;
+            io.print(cast<str>(fraction() < 1.0) + " " + cast<str>(die(3, 3)));
+        "#,
+        ),
+    );
+    assert_eq!(out, "true 3\n");
+}
+
+/// The standard library is not stubbable, so a test replaces the module
+/// function that reads a random number -- which is the whole seam.
+#[test]
+fn a_random_dependency_is_stubbed_at_the_module() {
+    let report = tests_pass(
+        "randomstub",
+        &[
+            (
+                "rates.binz",
+                "import binz/random;\n\
+                 function lookup(country: str): f64 { return random.f64(); }\n",
+            ),
+            (
+                "main.binz",
+                "import binz/test;\n\
+                 import @root/rates.binz;\n\
+                 function total(amount: f64, country: str): f64 {\n\
+                     return amount * rates.lookup(country);\n\
+                 }\n\
+                 @test function appliesTheRate(): void {\n\
+                     stub rates.lookup(country: str): f64 { return 0.5; }\n\
+                     test.equal(total(100.0, \"br\"), 50.0);\n\
+                 }\n\
+                 @test function withoutAStubOnlyTheBoundsHold(): void {\n\
+                     const full: f64 = total(100.0, \"br\");\n\
+                     test.equal(full >= 0.0 && full < 100.0, true);\n\
+                 }\n",
+            ),
+        ],
+    );
+    assert!(report.contains("2 passed"), "{}", report);
+}

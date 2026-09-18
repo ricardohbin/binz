@@ -41,6 +41,9 @@ Every design decision below falls out of that rule.
 | `container.size(c)` / `string.size(s)` / `map.size(m)` | one `size` per type family, rather than one name resolving three ways |
 | Sequences use `find` / `erase`, sets use `contains` / `remove` | positions and keys are different questions, so they get different verbs |
 | `[T; N]` copies, `Vector<T>` aliases | one rule: frame storage is a value, heap storage is a handle |
+| A test is tagged `@test` and named for what it asserts | the tag says it is a test, so the name may not say it again |
+| `test.equal` is the one assertion | `equal` states what was expected; `test.fail` covers what equality cannot say |
+| A stub replaces a module's function, written at the top of the test | mocking without interfaces or an argument threaded through three layers |
 
 ## Install & use
 
@@ -52,6 +55,7 @@ binz run   examples/containers.binz   # the container tour
 binz run   examples/maps.binz         # the map tour
 binz run   examples/stdlib.binz       # the standard library tour
 binz run   examples/modules.binz      # a program split over three files
+binz test  examples/orders.binz       # run the `@test` functions it can reach
 binz build examples/tour.binz         # emit examples/tour.binzc
 binz exec  examples/tour.binzc        # execute an artifact
 binz dump  examples/tour.binzc        # disassemble
@@ -372,6 +376,8 @@ words, and `container.add` does not stop you writing your own
 | `binz/float` | `parse` `canParse` `abs` `min` `max` `floor` `ceil` `round` `sqrt` `pow` `isNan` |
 | `binz/container` | the eleven container verbs, [above](#containers) |
 | `binz/map` | the six map verbs, [above](#maps) |
+| `binz/random` | `f64` `i32` — [below](#binzrandom) |
+| `binz/test` | `equal` `calls` `fail`, reachable only from a test — [below](#tests) |
 
 ### Which members are values
 
@@ -437,6 +443,47 @@ where to go instead:
 ```
 error: `int.abs` needs an `i32` or an `i64`, found `f64`; an `f64` answers `float.abs`
 ```
+
+### binz/random
+
+A member is named for the type it answers, because that is the whole of what
+it is:
+
+```c
+import binz/random;
+
+const r: f64 = random.f64();       // 0.0 <= r < 1.0, never 1.0
+const d: i32 = random.i32(1, 6);   // a die -- both ends included
+```
+
+`random.i32` traps on a backwards range, since an empty range has no value to
+answer with and binZ has no `null`. Both members are monomorphic, so both are
+ordinary function values.
+
+The generator is seeded from the operating system once per process and
+**there is no way to set the seed**. Code that has to be predictable does not
+replay a random number — it [stubs](#stubbing-a-module) the module function
+that reads one. The standard library is not stubbable, so the seam is always
+your own function:
+
+```c
+// rates.binz -- the dependency a test cannot predict
+function lookup(country: str): f64 {
+    return random.f64();
+}
+```
+
+```c
+@test function appliesTheRate(): void {
+    stub rates.lookup(country: str): f64 { return 0.5; }
+
+    test.equal(total(100.0, "br"), 50.0);
+}
+```
+
+Without that stub, all a test can say about `total(100.0, "br")` is that it
+lands between `0.0` and `100.0` — which is what `examples/orders.binz` shows
+side by side.
 
 ### When a name is missing
 
@@ -576,6 +623,114 @@ name — those are one lowercase word.
 A clash is per file. The same module is `math` in a file that imports only it,
 and renamed in a file that imports both.
 
+## Tests
+
+A test lives in the file it tests, tagged `@test`, and `binz test` is the only
+thing that runs one:
+
+```c
+import binz/test;
+
+function double(n: i32): i32 {
+    return n + n;
+}
+
+@test function doublesPositives(): void {
+    test.equal(double(21), 42);
+}
+```
+
+```sh
+binz test examples/orders.binz
+```
+
+`binz test` compiles the file it is given **and everything that file imports**,
+and runs every `@test` in the graph — so pointing it at the entry file runs the
+project. `main` is neither required nor run, which is also what lets a module
+be tested on its own: `binz test src/math.binz` works, and a module still may
+not define `main`.
+
+`binz build` and `binz run` do not compile a test at all. A test is not in the
+artifact, weighs nothing, and cannot be called — by its own file or by one
+importing it. The cost is the other half of that: a test that no longer
+compiles stops `binz test`, and nothing else.
+
+A test takes no arguments and answers `void`. It reports by failing, and there
+is no caller to read a result. **A test name may not start with `test`** — the
+tag above it already says that:
+
+```
+error: a test name cannot start with `test`: the `@test` tag above it already
+says that, so write `sumsPositives`
+```
+
+### Asserting
+
+| Written | Means |
+| --- | --- |
+| `test.equal(actual, expected)` | fails unless the two are `==`, printing both |
+| `test.fail(message)` | fails outright — for what equality cannot state |
+| `test.calls(math.add)` | how many times that function was called in this test |
+
+`test.equal` compares whatever `==` compares, and both sides are one type:
+binZ converts nothing on its own here either. A failure prints both sides
+with `cast<str>`, the one formatter the language has:
+
+```
+  FAIL  doublesNegatives
+        expected `0`, found `-2`
+```
+
+There is deliberately no `notEqual`, no `assert(condition)` and no `check` —
+`test.equal(x > 10, true)` states an expectation in the one spelling there is.
+`binz/test` is reachable only from a test body or a stub body; a program never
+runs one of these, so outside a test there is nothing for them to answer to.
+
+### Stubbing a module
+
+`stub` replaces a function of an imported module for the length of one test:
+
+```c
+import binz/test;
+import @root/rates.binz;
+
+function total(amount: f64, country: str): f64 {
+    return amount * rates.lookup(country);
+}
+
+@test function appliesTheRate(): void {
+    stub rates.lookup(country: str): f64 { return 0.5; }
+
+    test.equal(total(100.0, "br"), 50.0);
+    test.equal(test.calls(rates.lookup), 1);
+}
+```
+
+It replaces the **function**, not the call. Every path that reaches
+`rates.lookup` lands in the body written here, however deep in the import graph
+the call was written — which is the point: no interface, no dependency passed
+in, nothing threaded through three layers to reach the one place that has to
+lie. It is undone when the test ends, because each test runs in a machine of
+its own.
+
+The rules, and what each one is for:
+
+| Rule | Why |
+| --- | --- |
+| Every `stub` goes at the top of the test, before its first statement | what a test replaced is read once, not hunted for |
+| The signature is written out and must match the real one | a stub that has drifted from what it fakes is the one bug a test library must not hide |
+| One function, one stub per test | no guessing which body wins |
+| Only a module of this project — never `binz/io` | `io.print` means the same thing in every program |
+| Only inside an `@test` function | outside a test there is no length to replace it for |
+| A stub cannot call the function it replaces | the call would land back in the stub — there is no calling through |
+
+Since binZ has no globals and no closures, a stub body cannot record anything
+— which is why counting is the library's job. `test.calls` answers how many
+times a function of the program was called during this test, stubbed or not,
+and it is asserted with the same `test.equal` as everything else. A standard
+library call has no function id to count, so `test.calls(io.print)` is refused
+rather than answering zero forever.
+
 ## Implementation
 
 ```
@@ -593,7 +748,9 @@ The compiler is one pass: because binZ has no inference beyond literal typing,
 a type hint threaded downwards is enough to check and emit at the same time.
 
 The standard library is compiled in, not written in binZ, and `src/stdlib.rs`
-is its whole table. A monomorphic member is a *native*: its index is a
+is its whole table. `binz/random` is the one member with state: an xorshift64*
+word in the VM, seeded from the platform through `RandomState`, so the
+language still has no dependencies. A monomorphic member is a *native*: its index is a
 bytecode operand, it is pushed as an ordinary function value, and the VM
 executes it in `call_native`. A generic member is a *form*: the compiler
 resolves it against the type of its first argument and emits `OP_BUILTIN`.
@@ -628,6 +785,15 @@ inserts and deletes, asserting the root is black, no red node has a red
 child, every path carries the same black height, parent links agree, and the
 in-order walk is ascending — against a plain `Vec` kept as the oracle.
 
+`binz test` is the same compiler in a second mode. `@test` functions and the
+stub bodies inside them are the only difference: in run mode they are never
+declared, so they cannot be reached and cannot be emitted. A stub costs one
+instruction, `OP_STUB`, which pops a function value and records a redirect —
+every call already goes through a function id, so redirecting one is what
+makes a stub reach calls written anywhere in the graph. The redirect table is
+allocated only when a stub installs one, and the call counts only in a test
+run, so an ordinary program pays nothing for either existing.
+
 Runtime traps: division/remainder by zero, integer overflow, an index out of
 range, a map key that is not present, `pop` on an empty container, NaN
 used as a key, and dereferencing a pointer into a frame that has already been
@@ -636,14 +802,20 @@ popped.
 ### Artifact format
 
 Little-endian: `"BINZ"` magic, version, string pool, function table (name,
-parameter slot sizes, frame size, sret flag, code), entry index.
+parameter slot sizes, frame size, sret flag, code), entry index, test table.
+The entry index is optional and the test table is empty in everything
+`binz build` writes: both exist because a `binz test` compile has no `main`
+and carries the tests it found.
 
 ## Not in v0.1
 
 Slices, user-written generics, closures, exported types (a module exports its
 functions only), methods, enums/unions, bitwise operators, and
 unsigned integers. The standard library is a scratch: no file or process I/O
-beyond `io.print`, no time, no random. `cast<str>` formats scalars only, so a
+beyond `io.print`, no time. `binz/random` cannot be seeded, so a
+failing random case cannot be replayed. A test run has no setup, no teardown
+and no filter — `binz test <file>` runs everything it can reach. `cast<str>` formats
+scalars only, so a
 container is printed by iterating it. Heap containers cannot hold structs, and their elements have no
 address. Dangling pointers are detectable but not prevented — pointer
 lifetimes are C-like, not borrow-checked.

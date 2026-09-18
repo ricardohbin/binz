@@ -1,0 +1,13 @@
+import binz/io;
+import binz/random;
+
+/// The dependency a test cannot predict. A real one would be a network call;
+/// this one is random, which is the same problem in one line.
+///
+/// Note what a test replaces: *this* function, not `random.f64`. The standard
+/// library is not stubbable -- `random.f64` means the same thing in every
+/// program -- so the seam is the module function that reads it.
+function lookup(country: str): f64 {
+    io.print("  (the real rates module ran)");
+    return random.f64();
+}
