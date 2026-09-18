@@ -129,6 +129,16 @@ does not go in.
   gone: module members are a separate namespace, so `container.add` never
   takes the word `add` from the program and nothing resolves "last".
 
+## Repo mechanics
+
+- **CI, 2026-09-15**: `.github/workflows/ci.yml`, one job — build, `cargo
+  test`, then run every `examples/*.binz`. On push to `main` and every PR.
+  He scoped it: "no release or other things". **`cargo fmt --check` and
+  `cargo clippy -D warnings` are deliberately absent** — the tree is 141
+  rustfmt diffs from default and clippy has 3 lints, one of which
+  (`enum_variant_names`) wants a variant renamed, which is his call. Both
+  are one step away if he wants them. Detail in `memory/2026-09-15.md`.
+
 ## Open, not yet decided by him
 
 - **No `null`** — my call, not his. Un-C. He may want it back.
