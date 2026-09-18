@@ -172,12 +172,34 @@ does not go in.
 ## Repo mechanics
 
 - **CI, 2026-09-15**: `.github/workflows/ci.yml`, one job — build, `cargo
-  test`, then run every `examples/*.binz`. On push to `main` and every PR.
+  test`, then the examples. On push to `main` and every PR.
   He scoped it: "no release or other things". **`cargo fmt --check` and
   `cargo clippy -D warnings` are deliberately absent** — the tree is 141
   rustfmt diffs from default and clippy has 3 lints, one of which
   (`enum_variant_names`) wants a variant renamed, which is his call. Both
   are one step away if he wants them. Detail in `memory/2026-09-15.md`.
+- **The examples are two steps, 2026-09-18**, because **an example is not
+  always a program**. `binz run` refuses a file with no `main`, and a
+  test-only example has none by design — that is what makes a module testable
+  on its own. So **Run the examples** guards with `grep -q '^function main'`
+  and *echoes every skip*, so a `main` lost by accident cannot hide; **Test
+  the examples** runs `binz test` over all of them. The second is not
+  redundant: it compiles each file *and its import graph*, so it covers what
+  the first skips, and **it is the only CI step that type checks a test at
+  all** — `binz build`/`binz run` never compile one.
+  **When changing these loops, prove green isn't vacuous**: drop in a
+  temporary example with no `main` and a failing `test.equal(1, 2)` and
+  confirm the run step skips it *and the test step exits 1*.
+- **`pull_request` workflows trigger on opened/synchronize only.** Learned the
+  hard way 2026-09-18: PR #8 was cut before CI existed and merged 59 seconds
+  after the CI PR, so it ran **zero** checks and put the first break on main.
+  Merging a workflow to `main` does **not** retro-trigger open PRs.
+- **`main` is `protected: true`, but that is not a required status check.**
+  A required check that never reports *blocks* a merge; #8 merged clean with
+  none, so the rule isn't set (or he bypassed as admin). **Unverified — I
+  can't read branch-protection settings with the GitHub MCP tools.** His to
+  set: require `build & test`, plus **Require branches to be up to date**,
+  or a PR off a stale main can pass its own CI and still break main.
 
 ## Open, not yet decided by him
 
@@ -213,7 +235,14 @@ does not go in.
   dedicated diagnostic. Flagged 2026-09-15.
 - **A test is not type checked by `binz build`/`binz run`**, since neither
   compiles one. The price of a test weighing nothing in the artifact, but a
-  stale test stays invisible until `binz test` runs. Flagged 2026-09-17.
+  stale test stays invisible until `binz test` runs. Flagged 2026-09-17;
+  **partly closed 2026-09-18** for the examples only, which CI now runs
+  `binz test` over. Nothing type checks a test in a user's own project.
+- **The only green CI run ever — `build & test` on PR #7 — took 7 seconds**
+  (18:26:18 -> 18:26:25), which cannot cover checkout, toolchain, `cargo
+  build --all-targets`, `cargo test` and the examples. May just be unreliable
+  check-run timestamps; **I can't read Actions logs through MCP, so this is
+  unverified**. Asked him to open the job. Flagged 2026-09-18.
 - **The standard library cannot be stubbed**, so `io.print` output cannot be
   captured in a test. Natives are not bytecode functions and would need a
   second redirect table. The likeliest next ask. Flagged 2026-09-17.

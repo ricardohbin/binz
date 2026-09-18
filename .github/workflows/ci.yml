@@ -32,9 +32,29 @@ jobs:
 
       # The end-to-end tests drive the compiler directly, so the examples are
       # the only thing checking that the shipped programs still compile.
+      #
+      # An example is not always a program: a file that exists to show `@test`
+      # has no `main` by design, which is what makes a module testable on its
+      # own, and `binz run` refuses it. Run the ones that are programs, and say
+      # out loud which ones were skipped so a missing `main` can't hide here.
       - name: Run the examples
         run: |
           for f in examples/*.binz; do
-            echo "--- $f"
-            cargo run --quiet --locked -- run "$f"
+            if grep -q '^function main' "$f"; then
+              echo "--- run $f"
+              cargo run --quiet --locked -- run "$f"
+            else
+              echo "--- skip $f (no main, test-only)"
+            fi
+          done
+
+      # Every example, program or not. `binz test` compiles the file and its
+      # whole import graph, so this is what covers the test-only files the step
+      # above skips -- and it is the only step that type checks a test at all,
+      # since `binz build` and `binz run` never compile one.
+      - name: Test the examples
+        run: |
+          for f in examples/*.binz; do
+            echo "--- test $f"
+            cargo run --quiet --locked -- test "$f"
           done
