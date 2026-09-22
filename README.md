@@ -86,6 +86,41 @@ The type annotation is mandatory. An integer literal takes the type it is
 assigned to (`i32` when there is nothing to go on); a float literal is always
 `f64`, so `const x: f64 = 3;` is an error — write `3.0`.
 
+### Blocks and scope
+
+A bare `{ ... }` is a statement, and it is a scope: every variable declared
+inside it is gone at the closing brace. `while` is the only loop, so this is
+how a loop counter is kept from outliving the loop.
+
+```c
+{
+    var i: i32 = 0;
+    while (i <= 10) {
+        io.print(cast<str>(i));
+        i = i + 1;
+    }
+}
+// `i` is not defined here
+```
+
+The frame slots a block used are handed back at the brace, so a block is a
+compile-time rule and costs nothing at runtime.
+
+**There is no shadowing.** A name that is still alive in an enclosing scope
+cannot be declared again by an inner block, and that includes a parameter:
+
+```c
+var i: i32 = 0;
+{
+    var i: i32 = 99;   // error: `i` is already declared in an enclosing
+}                      //        scope, and binZ has no shadowing
+```
+
+The one-way rule again: with shadowing, `i` inside the braces names one of two
+variables and the reader has to count braces to know which. A name is free
+again once the block that owns it has closed, so two sibling blocks may both
+call their counter `i`.
+
 ### Functions
 
 Declared at the top level, in any order (forward and mutual recursion work).

@@ -178,6 +178,49 @@ fn control_flow_and_short_circuit() {
 }
 
 #[test]
+fn a_block_is_a_scope_of_its_own() {
+    let out = run_ok(
+        "blockscope",
+        &in_main(
+            r#"
+            var total: i32 = 0;
+            {
+                var i: i32 = 0;
+                while (i <= 3) {
+                    total = total + i;
+                    i = i + 1;
+                }
+            }
+            { var i: i32 = 100; total = total + i; }
+            io.print(cast<str>(total));
+        "#,
+        ),
+    );
+    assert_eq!(out, "106\n");
+}
+
+#[test]
+fn a_block_local_is_gone_after_the_block() {
+    let e = run_err("blockgone", &in_main("{ var i: i32 = 0; } io.print(cast<str>(i));"));
+    assert!(e.contains("`i` is not defined"), "{}", e);
+}
+
+#[test]
+fn rejects_shadowing_an_outer_variable() {
+    let e = run_err("shadow", &in_main("var i: i32 = 0; { var i: i32 = 1; io.print(cast<str>(i)); }"));
+    assert!(e.contains("enclosing scope") && e.contains("no shadowing"), "{}", e);
+}
+
+#[test]
+fn rejects_shadowing_a_parameter() {
+    let e = run_err(
+        "shadowparam",
+        "function f(n: i32): i32 { { const n: i32 = 2; return n; } }\n         function main(): i32 { return f(1); }",
+    );
+    assert!(e.contains("enclosing scope"), "{}", e);
+}
+
+#[test]
 fn structs_are_value_types() {
     let out = run_ok(
         "structs",

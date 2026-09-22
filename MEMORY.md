@@ -29,6 +29,19 @@ does not go in.
   (struct returns compile to a hidden destination pointer, so nothing dangles).
 - Pointers: `&place` (only on `var` places) and `*p`. No `->`, write `(*p).x`.
 - `while` is the only loop; no `+=`/`++`; conditions must be `bool`.
+- **Block scope and no shadowing, 2026-09-21 — his ask.** A bare `{ ... }` is
+  a statement and a scope: everything declared in it dies at the brace, and
+  `compile_block` hands the frame slots back (`next_slot` is rewound), so a
+  block costs nothing at runtime. That half shipped in the first commit and
+  was simply undocumented. What he added: **a name still alive in an
+  enclosing scope cannot be declared again** — "`i` is already declared in an
+  enclosing scope, and binZ has no shadowing" — one `.skip(1)` walk in
+  `declare`, which also covers parameters since they live in `scopes[0]`. The
+  cost of the old behaviour, measured: a `var i` inside a `while` body
+  shadowed the counter, so `i = i + 1` moved the inner copy and the loop never
+  ended. The idiom for a counted loop is now `{ var i: i32 = 0; while (...) {
+  ... } }`, and a sibling block may reuse the name. Compile-time only; no VM,
+  bytecode or artifact change. Rationale in `memory/2026-09-21.md`.
 - Containers, 2026-09-11: `[T; N]` is a frame value and copies; `Vector<T>`,
   `LinkedList<T>`, `Set<T>`, `SortedSet<T>` are heap handles and alias.
   `c[i]` indexes all five, `container.size(c)` measures all five (a `str`
@@ -253,6 +266,9 @@ does not go in.
 - **`import binz/test;` reserves `test` in the file**, the same bite as `map`.
 - **`test.calls` counts every call to the function**, including the ones the
   module makes to itself. Flagged 2026-09-17.
+- **A `while` still has no header**, so a counter needs the enclosing-block
+  idiom. Giving the loop its own binding would be a second way to do the same
+  thing, so it waits for his word. Flagged 2026-09-21.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
 - `.binzc` artifact extension was my extrapolation from his `.binz` request.
 

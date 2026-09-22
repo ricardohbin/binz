@@ -897,6 +897,16 @@ impl Compiler {
                 span,
             ));
         }
+        // No shadowing: a name that is still alive in an enclosing scope
+        // cannot be taken again by an inner block. One name is one variable
+        // for as long as it is readable, so `i` never means two things
+        // depending on how many braces deep the reader is.
+        if self.scopes.iter().rev().skip(1).any(|sc| sc.iter().any(|l| l.name == name)) {
+            return Err(CompileError::new(
+                format!("`{}` is already declared in an enclosing scope, and binZ has no shadowing", name),
+                span,
+            ));
+        }
         self.scopes
             .last_mut()
             .unwrap()

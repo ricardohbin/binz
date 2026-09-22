@@ -62,11 +62,16 @@ function main(): i32 {
     const greeting: str = "-- binZ tour --";
     io.print(greeting);
 
-    var i: i64 = 0;
+    // a bare block is a scope: `i` dies at the closing brace, which is how a
+    // loop counter is kept out of the rest of the function. no shadowing --
+    // declaring `i` again while the outer one is alive is an error.
     var total: i64 = 0;
-    while (i < 10) {
-        total = total + i;
-        i = i + 1;
+    {
+        var i: i64 = 0;
+        while (i < 10) {
+            total = total + i;
+            i = i + 1;
+        }
     }
     io.print("sum 0..9 = " + cast<str>(total));
 
