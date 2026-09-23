@@ -16,10 +16,6 @@ struct Release {
     tags: Vector<str>
 }
 
-function blank(): Release {
-    return Release{ someField: "", year: 0, tags: Vector<str>{} };
-}
-
 function report(err: Error): void {
     io.print("error " + cast<str>(err.code) + ": " + err.reason);
     io.print(err.stacktrace);
@@ -27,7 +23,7 @@ function report(err: Error): void {
 }
 
 function main(): i32 {
-    var r: Release = blank();
+    var r: Release = Release{};
     var err: Error = json.parse(
         "{\"some_field\": \"binZ\", \"year\": 2026, \"tags\": [\"vm\", \"json\"], \"ignored\": true}",
         &r
@@ -53,7 +49,7 @@ function main(): i32 {
 
 @test
 function readsWhatItWrites(): void {
-    var r: Release = blank();
+    var r: Release = Release{};
     var text: str = "";
     var err: Error = json.stringify(r, &text);
     test.equal(text, "{\"some_field\":\"\",\"year\":0,\"tags\":[]}");
@@ -65,7 +61,7 @@ function readsWhatItWrites(): void {
 
 @test
 function aMissingKeyIsCodeThree(): void {
-    var r: Release = blank();
+    var r: Release = Release{};
     const err: Error = json.parse("{\"year\": 1, \"tags\": []}", &r);
     test.equal(err.code, 3);
     test.equal(err.reason, "`$.some_field` is missing");

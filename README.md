@@ -26,7 +26,7 @@ Every design decision below falls out of that rule.
 | Only `while` for loops | `for`/`do`/`foreach` are the same loop |
 | No `+=`, `++`, `--` | `x = x + 1` |
 | Conditions are parenthesised and must be `bool` | no truthiness, no `if x = 0` trap |
-| Struct literals list every field, in declaration order | one shape per struct |
+| Struct literals list every field, in declaration order — or none, as `Point{}`, for all defaults | one shape per struct, and no literal that leaves the reader guessing which fields were skipped |
 | `const` / `var` — no third form | immutable by default in spirit |
 | No `null` | a `*T` always points at something |
 | `c[i]` indexes every container | one spelling for "the element at i", by position for a sequence and by key for a map |
@@ -169,6 +169,13 @@ struct Point { x: i64, y: i64 }
 var a: Point = Point { x: 1, y: 2 };
 var b: Point = a;        // full copy, not an alias
 ```
+
+A literal names every field or none. `Point{}` sets every field to its
+default: `0`, `0.0`, `false`, `""`, an empty container or map, and the same
+again for a nested struct and for each element of an array (every element
+gets a container of its own). A pointer or a function has no default, since
+there is no `null`, so a struct holding one has to be written out in full.
+`Error{}` is therefore "no error".
 
 They are passed and returned by value too — a struct return is compiled with a
 hidden destination pointer, so no copy is left dangling.
@@ -541,7 +548,7 @@ struct Point {
 }
 
 function main(): i32 {
-    var p: Point = Point{ someField: "", year: 0 };
+    var p: Point = Point{};          // every field at its default
     var err: Error = json.parse("{\"some_field\": \"x\", \"year\": 2026}", &p);
     if (err.code != 0) {
         io.print(err.reason);

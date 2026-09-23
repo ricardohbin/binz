@@ -1766,13 +1766,18 @@ impl Compiler {
             None => return Err(CompileError::new(format!("unknown struct `{}`", name), span)),
         };
         let info = self.structs[id].clone();
+        if fields.is_empty() {
+            return self.compile_default_lit(id, span);
+        }
         if fields.len() != info.fields.len() {
             return Err(CompileError::new(
                 format!(
-                    "struct `{}` has {} fields but {} were given; binZ requires every field, in declaration order",
+                    "struct `{}` has {} fields but {} were given; binZ requires every field, in \
+                     declaration order -- or none, as `{}{{}}`, for every field at its default",
                     name,
                     info.fields.len(),
-                    fields.len()
+                    fields.len(),
+                    name
                 ),
                 span,
             ));
@@ -1802,6 +1807,139 @@ impl Compiler {
         }
         self.emit_op_u32(OP_ADDR_LOCAL, slot);
         Ok(Type::Struct(id))
+    }
+
+    /// `Point{}`: every field at its default -- `0`, `0.0`, `false`, `""`,
+    /// an empty container, and the same again for a nested struct or each
+    /// element of an array. It is all or nothing: a literal names every
+    /// field or none, so a value never has a spelling that leaves the reader
+    /// to work out which fields were skipped.
+    fn compile_default_lit(&mut self, id: usize, span: Span) -> CResult<Type> {
+        let ty = Type::Struct(id);
+        if let Err((path, bad)) = self.defaultable(&ty, String::new()) {
+            let name = self.structs[id].name.clone();
+            return Err(CompileError::new(
+                format!(
+                    "`{}{{}}` sets every field to its default, and `{}` is a `{}`, which has \
+                     none -- binZ has no `null`; write every field instead",
+                    name,
+                    path,
+                    self.tn(&bad)
+                ),
+                span,
+            ));
+        }
+        let size = self.size_of(&ty);
+        let slot = self.reserve(size);
+        // The defaults are written through an address held in a local, so a
+        // nested struct or an array element is filled by the same code as a
+        // top-level field.
+        let at = self.reserve(1);
+        self.emit_op_u32(OP_ADDR_LOCAL, slot);
+        self.emit_op_u32(OP_STORE_LOCAL, at);
+        self.emit_default(&ty, at, 0);
+        self.emit_op_u32(OP_ADDR_LOCAL, slot);
+        Ok(ty)
+    }
+
+    /// Whether every slot of `t` has a default, and if not, the field path
+    /// and type of the first that does not. A pointer and a function have
+    /// none, because there is no `null` to put in them.
+    fn defaultable(&self, t: &Type, path: String) -> Result<(), (String, Type)> {
+        match t {
+            Type::Struct(id) => {
+                for f in &self.structs[*id].fields {
+                    let p = if path.is_empty() { f.name.clone() } else { format!("{}.{}", path, f.name) };
+                    self.defaultable(&f.ty, p)?;
+                }
+                Ok(())
+            }
+            Type::Array(elem, _) => self.defaultable(elem, format!("{}[i]", path)),
+            Type::Ptr(_) | Type::Fn(..) => Err((path, t.clone())),
+            _ => Ok(()),
+        }
+    }
+
+    /// Writes the default of `t` at `*at + off`, where local `at` holds an
+    /// address.
+    fn emit_default(&mut self, t: &Type, at: u32, off: u32) {
+        match t {
+            Type::Struct(id) => {
+                for f in self.structs[*id].fields.clone() {
+                    self.emit_default(&f.ty, at, off + f.offset);
+                }
+            }
+            // A runtime loop, so a long array costs the code of one element
+            // -- and each element gets a container of its own rather than
+            // sharing the first one's handle.
+            Type::Array(elem, n) => {
+                let esize = self.size_of(elem);
+                let counter = self.reserve(1);
+                let inner = self.reserve(1);
+                self.emit(OP_PUSH_I32);
+                self.emit_u32(0);
+                self.emit_op_u32(OP_STORE_LOCAL, counter);
+                let top = self.code.len();
+                self.emit_op_u32(OP_LOAD_LOCAL, counter);
+                self.emit(OP_PUSH_I32);
+                self.emit_u32(*n);
+                self.emit(OP_LT);
+                let exit = self.emit_jump(OP_JMP_IF_FALSE);
+                self.emit_op_u32(OP_LOAD_LOCAL, at);
+                self.emit_op_u32(OP_FIELD, off);
+                self.emit_op_u32(OP_LOAD_LOCAL, counter);
+                self.emit(OP_ELEM);
+                self.emit_u32(esize);
+                self.emit_u32(*n);
+                self.emit_op_u32(OP_STORE_LOCAL, inner);
+                self.emit_default(elem, inner, 0);
+                self.emit_op_u32(OP_LOAD_LOCAL, counter);
+                self.emit(OP_PUSH_I32);
+                self.emit_u32(1);
+                self.emit(OP_ADD);
+                self.emit_op_u32(OP_STORE_LOCAL, counter);
+                self.emit_jump_back(OP_JMP, top);
+                self.patch_jump(exit);
+            }
+            _ => {
+                self.emit_op_u32(OP_LOAD_LOCAL, at);
+                self.emit_op_u32(OP_FIELD, off);
+                match t {
+                    Type::I32 => {
+                        self.emit(OP_PUSH_I32);
+                        self.emit_u32(0);
+                    }
+                    Type::I64 => {
+                        self.emit(OP_PUSH_I64);
+                        self.code.extend_from_slice(&0i64.to_le_bytes());
+                    }
+                    Type::F64 => {
+                        self.emit(OP_PUSH_F64);
+                        self.code.extend_from_slice(&0f64.to_le_bytes());
+                    }
+                    Type::Bool => {
+                        self.emit(OP_PUSH_BOOL);
+                        self.emit(0);
+                    }
+                    Type::Str => {
+                        let idx = self.intern("");
+                        self.emit_op_u32(OP_PUSH_STR, idx);
+                    }
+                    Type::Container(kind, _) => {
+                        self.emit(OP_NEW);
+                        self.emit(kind_code(*kind));
+                        self.emit_u32(0);
+                    }
+                    Type::Map(mk, ..) => {
+                        self.emit(OP_NEW);
+                        self.emit(map_kind_code(*mk));
+                        self.emit_u32(0);
+                    }
+                    _ => unreachable!("`defaultable` refused `{}`", self.tn(t)),
+                }
+                self.emit(OP_STORE_PTR);
+            }
+        }
     }
 
     /// A map is subscripted by its key type, the one place where the thing

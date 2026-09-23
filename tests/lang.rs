@@ -2273,14 +2273,10 @@ struct Point {
   home: Home
 }
 
-function blank(): Point {
-  return Point{ someField: \"\", year: 0, ratio: 0.0, ok: false, tags: Vector<str>{},
-                xy: [0, 0], home: Home{ city: \"\", zipCode: \"\" } };
-}
 ";
 
 fn json_main(body: &str) -> String {
-    format!("{}function main(): i32 {{\n var p: Point = blank();\n var err: Error = Error{{ reason: \"\", stacktrace: \"\", code: 0 }};\n var text: str = \"\";\n{}\n return 0;\n}}\n", JSON_POINT, body)
+    format!("{}function main(): i32 {{\n var p: Point = Point{{}};\n var err: Error = Error{{}};\n var text: str = \"\";\n{}\n return 0;\n}}\n", JSON_POINT, body)
 }
 
 #[test]
@@ -2339,7 +2335,7 @@ fn json_round_trips() {
   p.someField = "a\tb";
   p.ratio = 0.1;
   err = json.stringify(p, &text);
-  var q: Point = blank();
+  var q: Point = Point{};
   err = json.parse(text, &q);
   var again: str = "";
   err = json.stringify(q, &again);
@@ -2533,4 +2529,48 @@ fn json_tags_go_where_they_mean_something() {
     assert!(e.contains("goes inside an `@json` struct"), "{}", e);
     let e = run_err("json_field_lit", "@json struct P { @field(x) a: i32 }\nfunction main(): i32 { return 0; }");
     assert!(e.contains("as a string literal"), "{}", e);
+}
+
+// ------------------------------------------------------- default literals
+
+#[test]
+fn an_empty_literal_sets_every_field_to_its_default() {
+    let out = run_ok(
+        "default_lit",
+        "struct In { v: Vector<i32>, m: HashMap<str, i32>, b: bool }\n\
+         struct P { a: i32, w: i64, f: f64, s: str, b: bool, xs: [In; 3], inner: In }\n\
+         function main(): i32 {\n\
+           var p: P = P{};\n\
+           io.print(cast<str>(p.a) + cast<str>(p.w) + \" \" + cast<str>(p.f) + \" [\" + p.s + \"] \" + cast<str>(p.b) + \" \" + cast<str>(p.inner.b));\n\
+           container.push(p.xs[0].v, 7);\n\
+           io.print(cast<str>(container.size(p.xs[0].v)) + cast<str>(container.size(p.xs[1].v)) + cast<str>(map.size(p.inner.m)));\n\
+           const e: Error = Error{};\n\
+           io.print(cast<str>(e.code) + \"[\" + e.reason + e.stacktrace + \"]\");\n\
+           return 0;\n}\n",
+    );
+    // Each element of the array got a container of its own.
+    assert_eq!(out, "00 0.0 [] false false\n100\n0[]\n");
+}
+
+#[test]
+fn a_literal_names_every_field_or_none() {
+    let e = run_err(
+        "default_partial",
+        "struct N { a: i32, b: i32 }\nfunction main(): i32 { var n: N = N{ a: 1 }; return 0; }",
+    );
+    assert!(e.contains("or none, as `N{}`"), "{}", e);
+}
+
+#[test]
+fn a_pointer_or_a_function_has_no_default() {
+    let e = run_err(
+        "default_ptr",
+        "struct N { v: i32, next: *N }\nstruct W { n: [N; 2] }\nfunction main(): i32 { var w: W = W{}; return 0; }",
+    );
+    assert!(e.contains("`n[i].next` is a `*N`, which has none"), "{}", e);
+    let e = run_err(
+        "default_fn",
+        "struct N { f: function(): void }\nfunction main(): i32 { var n: N = N{}; return 0; }",
+    );
+    assert!(e.contains("`f` is a `function(): void`, which has none"), "{}", e);
 }

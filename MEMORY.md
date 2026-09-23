@@ -148,6 +148,11 @@ does not go in.
   `bool`"**, flagged. A failed call leaves the destination untouched. The
   schema of each `@json` struct lives in the artifact (VERSION 5). Rationale
   in `memory/2026-09-23.md`.
+- **`T{}` default literal, 2026-09-23 — his ask.** Every field or none:
+  `Point{}` gives `0`, `0.0`, **`false`** (he proposed `true`; I pushed back,
+  he chose `false`), `""`, a fresh empty container/map per slot, recursively.
+  Pointer/function fields have no default (no `null`) and force a full
+  literal. Partial literals stay refused. `Error{}` means no error.
 - **Standard library, 2026-09-14**: `import binz/io;` and every member is
   reached as `io.print`. The binding is the last path segment, **always** —
   no alias, no wildcard, no bare import — so two modules may both define
@@ -285,8 +290,8 @@ does not go in.
 - **`if (err)` truthiness for `Error`** — he wrote it; I kept `bool`-only
   conditions and made `if (err)` an error naming `err.code != 0`. Flagged
   2026-09-23.
-- **`json.parse` needs a fully initialised `var` to fill** (no uninitialised
-  declarations), so big structs need a `blank()` helper. Flagged 2026-09-23.
+- **`T{}` overlaps a full literal of all-zero values** — the same bend as
+  `[0; 3]`. Taken 2026-09-23 on his ask, all-or-nothing so it stays one bend.
 - **No `HashMap<str, V>` <-> JSON object, no optional fields** in
   `binz/json`. Flagged 2026-09-23.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
