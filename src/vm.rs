@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use crate::bytecode::*;
 use crate::obj::{self, Handle};
+use crate::types::{ERROR_CODE, ERROR_REASON, ERROR_STACKTRACE};
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -591,8 +592,70 @@ impl Vm {
                 let h = self.as_obj(c, m)?;
                 self.checked(obj::map_keys(&h), m)?
             }
+            B_JSON_PARSE => {
+                let schema = self.pop();
+                let out = self.pop();
+                let text = self.pop();
+                let dst = self.pop();
+                let (schema, out, dst) =
+                    (self.schema_arg(&schema, m)?, self.as_ptr(out, m)?, self.as_ptr(dst, m)?);
+                let text = self.str_arg(&text, m)?;
+                // The destination is written only once the whole value has
+                // been read, so a failure hands back nothing half-filled.
+                let result = crate::json::parse(&m.schemas, schema, &text).map(|slots| {
+                    for (k, v) in slots.into_iter().enumerate() {
+                        self.mem[out + k] = v;
+                    }
+                });
+                self.write_error(dst, result, m);
+                Value::Ptr(dst)
+            }
+            B_JSON_STRINGIFY => {
+                let schema = self.pop();
+                let out = self.pop();
+                let value = self.pop();
+                let dst = self.pop();
+                let (schema, out, value, dst) = (
+                    self.schema_arg(&schema, m)?,
+                    self.as_ptr(out, m)?,
+                    self.as_ptr(value, m)?,
+                    self.as_ptr(dst, m)?,
+                );
+                let result = crate::json::stringify(&m.schemas, schema, &self.mem, value)
+                    .map(|text| self.mem[out] = Value::Str(Rc::new(text)));
+                self.write_error(dst, result, m);
+                Value::Ptr(dst)
+            }
             other => rt!(self, m, "unknown builtin #{}", other),
         })
+    }
+
+    fn schema_arg(&self, v: &Value, m: &Module) -> Result<u32, RuntimeError> {
+        match v {
+            Value::I32(i) if (*i as usize) < m.schemas.len() => Ok(*i as u32),
+            _ => rt!(self, m, "no JSON schema #{:?} in this artifact", v),
+        }
+    }
+
+    /// Fills the `Error` at `dst`: all empty with `code` 0 on success, and
+    /// otherwise the reason, the code, and the calls that led here.
+    fn write_error(&mut self, dst: usize, result: Result<(), crate::json::Failure>, m: &Module) {
+        let (reason, stacktrace, code) = match result {
+            Ok(()) => (String::new(), String::new(), crate::json::OK),
+            Err(f) => (f.reason, self.stacktrace(m), f.code),
+        };
+        self.mem[dst + ERROR_REASON as usize] = Value::Str(Rc::new(reason));
+        self.mem[dst + ERROR_STACKTRACE as usize] = Value::Str(Rc::new(stacktrace));
+        self.mem[dst + ERROR_CODE as usize] = Value::I32(code);
+    }
+
+    /// The functions active right now, innermost first, one `at <name>` per
+    /// line. The artifact holds no line table, so a frame is named by its
+    /// function alone.
+    fn stacktrace(&self, m: &Module) -> String {
+        let lines: Vec<String> =
+            self.frames.iter().rev().map(|f| format!("at {}", m.funcs[f.func].name)).collect();
+        lines.join("\n")
     }
 
     fn as_ptr(&self, v: Value, m: &Module) -> Result<usize, RuntimeError> {

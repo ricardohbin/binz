@@ -18,7 +18,7 @@ fn write_temp(name: &str, src: &str) -> std::path::PathBuf {
 /// are exercised by `run_raw_err`, which writes its own file head.
 const PRELUDE: &str = "import binz/io;\nimport binz/string;\nimport binz/int;\n\
                        import binz/float;\nimport binz/container;\nimport binz/map;\n\
-                       import binz/random;\n";
+                       import binz/random;\nimport binz/json;\n";
 
 /// Runs a program, asserting it exits 0, and returns its stdout.
 fn run_ok(name: &str, src: &str) -> String {
@@ -951,8 +951,8 @@ fn points_a_bare_len_at_size() {
 
 #[test]
 fn rejects_an_unknown_module() {
-    let e = run_raw_err("nomodule", "import binz/json;\nfunction main(): i32 { return 0; }");
-    assert!(e.contains("there is no module `binz/json`"), "{}", e);
+    let e = run_raw_err("nomodule", "import binz/xml;\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("there is no module `binz/xml`"), "{}", e);
 }
 
 #[test]
@@ -2249,4 +2249,288 @@ fn a_random_dependency_is_stubbed_at_the_module() {
         ],
     );
     assert!(report.contains("2 passed"), "{}", report);
+}
+
+// ------------------------------------------------------------------ json
+
+const JSON_POINT: &str = "
+@json
+struct Home {
+  city: str,
+  @field(\"zip_code\")
+  zipCode: str
+}
+
+@json
+struct Point {
+  @field(\"some_field\")
+  someField: str,
+  year: i64,
+  ratio: f64,
+  ok: bool,
+  tags: Vector<str>,
+  xy: [i32; 2],
+  home: Home
+}
+
+function blank(): Point {
+  return Point{ someField: \"\", year: 0, ratio: 0.0, ok: false, tags: Vector<str>{},
+                xy: [0, 0], home: Home{ city: \"\", zipCode: \"\" } };
+}
+";
+
+fn json_main(body: &str) -> String {
+    format!("{}function main(): i32 {{\n var p: Point = blank();\n var err: Error = Error{{ reason: \"\", stacktrace: \"\", code: 0 }};\n var text: str = \"\";\n{}\n return 0;\n}}\n", JSON_POINT, body)
+}
+
+#[test]
+fn json_parses_renamed_and_nested_fields() {
+    let out = run_ok(
+        "json_parse",
+        &json_main(r#"
+  err = json.parse("{\"some_field\": \"hi\", \"year\": 9007199254740993, \"ratio\": -2.5e-1, \"ok\": true, \"tags\": [\"a\", \"\\u00e9\"], \"xy\": [3, 4], \"home\": {\"zip_code\": \"50000\", \"city\": \"Recife\"}}", &p);
+  io.print(cast<str>(err.code) + "|" + err.reason + "|" + err.stacktrace);
+  io.print(p.someField + " " + cast<str>(p.year) + " " + cast<str>(p.ratio) + " " + cast<str>(p.ok));
+  io.print(p.tags[1] + " " + cast<str>(p.xy[0] + p.xy[1]) + " " + p.home.city + " " + p.home.zipCode);
+"#),
+    );
+    assert_eq!(out, "0||\nhi 9007199254740993 -0.25 true\né 7 Recife 50000\n");
+}
+
+#[test]
+fn json_ignores_keys_the_struct_does_not_declare() {
+    let out = run_ok(
+        "json_extra",
+        &json_main(r#"
+  err = json.parse("{\"extra\": [1, {\"deep\": null}], \"some_field\": \"x\", \"year\": 1, \"ratio\": 1, \"ok\": false, \"tags\": [], \"xy\": [0, 0], \"home\": {\"city\": \"c\", \"zip_code\": \"z\", \"more\": 1}}", &p);
+  io.print(cast<str>(err.code) + " " + cast<str>(p.ratio));
+"#),
+    );
+    assert_eq!(out, "0 1.0\n");
+}
+
+#[test]
+fn json_stringify_writes_keys_in_declaration_order() {
+    let out = run_ok(
+        "json_stringify",
+        &json_main(r#"
+  p.someField = "q\"uote\n";
+  p.year = 2026;
+  p.ratio = 3.0;
+  container.push(p.tags, "t");
+  p.xy[1] = -1;
+  p.home.zipCode = "01";
+  err = json.stringify(p, &text);
+  io.print(cast<str>(err.code));
+  io.print(text);
+"#),
+    );
+    assert_eq!(
+        out,
+        "0\n{\"some_field\":\"q\\\"uote\\n\",\"year\":2026,\"ratio\":3.0,\"ok\":false,\"tags\":[\"t\"],\"xy\":[0,-1],\"home\":{\"city\":\"\",\"zip_code\":\"01\"}}\n"
+    );
+}
+
+#[test]
+fn json_round_trips() {
+    let out = run_ok(
+        "json_roundtrip",
+        &json_main(r#"
+  p.someField = "a\tb";
+  p.ratio = 0.1;
+  err = json.stringify(p, &text);
+  var q: Point = blank();
+  err = json.parse(text, &q);
+  var again: str = "";
+  err = json.stringify(q, &again);
+  io.print(cast<str>(err.code) + cast<str>(text == again));
+"#),
+    );
+    assert_eq!(out, "0true\n");
+}
+
+#[test]
+fn json_failures_answer_codes_and_leave_the_value_alone() {
+    let out = run_ok(
+        "json_failures",
+        &json_main(r#"
+  p.someField = "untouched";
+  err = json.parse("{\"some_field\": ", &p);
+  io.print(cast<str>(err.code) + " " + err.reason);
+  err = json.parse("{\"some_field\": \"x\", \"year\": 1.5}", &p);
+  io.print(cast<str>(err.code) + " " + err.reason);
+  err = json.parse("{\"some_field\": \"x\", \"year\": 1, \"ratio\": 1, \"ok\": true, \"tags\": [], \"xy\": [1, 2]}", &p);
+  io.print(cast<str>(err.code) + " " + err.reason);
+  err = json.parse("{\"a\": 1, \"a\": 2}", &p);
+  io.print(cast<str>(err.code) + " " + err.reason);
+  err = json.parse("{\"some_field\": \"x\", \"year\": 1, \"ratio\": 1, \"ok\": true, \"tags\": [], \"xy\": [1, 2, 3]}", &p);
+  io.print(cast<str>(err.code) + " " + err.reason);
+  err = json.parse("{\"some_field\": null}", &p);
+  io.print(cast<str>(err.code) + " " + err.reason);
+  err = json.parse("[]", &p);
+  io.print(cast<str>(err.code) + " " + err.reason);
+  io.print(p.someField);
+  p.ratio = 0.0 / 0.0;
+  text = "untouched";
+  err = json.stringify(p, &text);
+  io.print(cast<str>(err.code) + " " + err.reason + " " + text);
+"#),
+    );
+    assert_eq!(
+        out,
+        "1 line 1, column 16: expected a value, found the end of the text\n\
+         2 `$.year`: expected an integer, found 1.5\n\
+         3 `$.home` is missing\n\
+         4 line 1, column 10: the key \"a\" appears twice\n\
+         2 `$.xy`: expected an array of exactly 2, found 3 element(s)\n\
+         2 `$.some_field`: expected a string, found null\n\
+         2 `$`: expected an object, found an array\n\
+         untouched\n\
+         5 `$.ratio`: NaN has no JSON spelling untouched\n"
+    );
+}
+
+#[test]
+fn json_numbers_must_fit_their_field() {
+    let out = run_ok(
+        "json_numbers",
+        "@json struct N { a: i32 }\n@json struct W { a: i64 }\n@json struct F { a: f64 }\n\
+         function main(): i32 {\n\
+           var n: N = N{ a: 0 }; var w: W = W{ a: 0 }; var f: F = F{ a: 0.0 };\n\
+           var e: Error = json.parse(\"{\\\"a\\\": 2147483648}\", &n); io.print(e.reason);\n\
+           e = json.parse(\"{\\\"a\\\": 1e2}\", &n); io.print(e.reason);\n\
+           e = json.parse(\"{\\\"a\\\": 9223372036854775808}\", &w); io.print(e.reason);\n\
+           e = json.parse(\"{\\\"a\\\": 1e400}\", &f); io.print(e.reason);\n\
+           e = json.parse(\"{\\\"a\\\": -2147483648}\", &n); io.print(cast<str>(n.a));\n\
+           return 0;\n}\n",
+    );
+    assert_eq!(
+        out,
+        "`$.a`: 2147483648 does not fit in an i32\n\
+         `$.a`: expected an integer, found 1e2\n\
+         `$.a`: 9223372036854775808 does not fit in an i64\n\
+         `$.a`: 1e400 does not fit in an f64\n\
+         -2147483648\n"
+    );
+}
+
+#[test]
+fn json_error_carries_the_stack() {
+    let out = run_ok(
+        "json_stack",
+        "@json struct N { a: i32 }\n\
+         function load(text: str, n: *N): Error { return json.parse(text, n); }\n\
+         function main(): i32 {\n\
+           var n: N = N{ a: 0 };\n\
+           var e: Error = load(\"nope\", &n);\n\
+           if (e.code != 0) { io.print(e.stacktrace); }\n\
+           return 0;\n}\n",
+    );
+    assert_eq!(out, "at load\nat main\n");
+}
+
+#[test]
+fn error_is_an_ordinary_struct_a_program_may_answer() {
+    let out = run_ok(
+        "json_own_error",
+        "function check(x: i32): Error {\n\
+           if (x < 0) { return Error{ reason: \"negative\", stacktrace: \"\", code: 1 }; }\n\
+           return Error{ reason: \"\", stacktrace: \"\", code: 0 };\n}\n\
+         function main(): i32 {\n\
+           const e: Error = check(-1);\n\
+           io.print(cast<str>(e.code) + \" \" + e.reason);\n\
+           return 0;\n}\n",
+    );
+    assert_eq!(out, "1 negative\n");
+}
+
+#[test]
+fn error_crosses_a_module_boundary() {
+    let out = run_project_ok(
+        "json_error_module",
+        &[
+            ("main.binz", "import binz/io;\nimport @root/check.binz;\nfunction main(): i32 {\n  const e: Error = check.positive(-3);\n  io.print(e.reason);\n  return 0;\n}\n"),
+            ("check.binz", "function positive(x: i32): Error {\n  if (x < 0) { return Error{ reason: \"negative\", stacktrace: \"\", code: 1 }; }\n  return Error{ reason: \"\", stacktrace: \"\", code: 0 };\n}\n"),
+        ],
+    );
+    assert_eq!(out, "negative\n");
+}
+
+#[test]
+fn an_error_is_not_a_condition() {
+    let e = run_err(
+        "json_if_err",
+        "function main(): i32 { const e: Error = Error{ reason: \"\", stacktrace: \"\", code: 0 };\n if (e) { return 1; }\n return 0; }",
+    );
+    assert!(e.contains("write `if (err.code != 0)`"), "{}", e);
+}
+
+#[test]
+fn rejects_declaring_error() {
+    let e = run_err("json_decl_error", "struct Error { x: i32 }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("`Error` is declared by binZ itself"), "{}", e);
+}
+
+#[test]
+fn rejects_field_outside_a_json_struct() {
+    let e = run_err("json_field_plain", "struct P { @field(\"a\") b: i32 }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("`P` is not tagged `@json`"), "{}", e);
+}
+
+#[test]
+fn rejects_a_field_renamed_to_its_own_name() {
+    let e = run_err("json_field_same", "@json struct P { @field(\"b\") b: i32 }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("drop the tag"), "{}", e);
+}
+
+#[test]
+fn rejects_two_fields_on_one_key() {
+    let e = run_err("json_field_dup", "@json struct P { @field(\"a\") b: i32, a: i32 }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("would both be the JSON key \"a\""), "{}", e);
+}
+
+#[test]
+fn rejects_json_fields_json_cannot_hold() {
+    for (n, ty, why) in [
+        ("ptr", "*i32", "an address means nothing"),
+        ("map", "HashMap<str, i32>", "read into an `@json` struct"),
+        ("set", "Set<i32>", "`Vector<T>` or `[T; N]`"),
+        ("fn", "function(): void", "a function is not data"),
+    ] {
+        let e = run_err(
+            &format!("json_holds_{}", n),
+            &format!("@json struct P {{ q: {} }}\nfunction main(): i32 {{ return 0; }}", ty),
+        );
+        assert!(e.contains(why), "{}", e);
+    }
+    let e = run_err("json_holds_plain", "struct Q { x: i32 }\n@json struct P { q: Q }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("write `@json struct Q`"), "{}", e);
+}
+
+#[test]
+fn rejects_json_calls_on_the_wrong_things() {
+    let cases = [
+        ("plain", "struct S { a: i32 }", "var s: S = S{ a: 1 }; const e: Error = json.parse(\"{}\", &s);", "`S` is not tagged `@json`"),
+        ("byvalue", "@json struct S { a: i32 }", "var s: S = S{ a: 1 }; const e: Error = json.parse(\"{}\", s);", "write `json.parse(text, &value)`"),
+        ("ptrin", "@json struct S { a: i32 }", "var s: S = S{ a: 1 }; var t: str = \"\"; const e: Error = json.stringify(&s, &t);", "pass it by value"),
+        ("notstr", "@json struct S { a: i32 }", "var s: S = S{ a: 1 }; var t: i32 = 0; const e: Error = json.stringify(s, &t);", "through a `*str`"),
+        ("scalar", "", "var t: i32 = 0; const e: Error = json.parse(\"1\", &t);", "an object is a struct"),
+    ];
+    for (n, decl, body, want) in cases {
+        let e = run_err(
+            &format!("json_call_{}", n),
+            &format!("{}\nfunction main(): i32 {{ {} return 0; }}", decl, body),
+        );
+        assert!(e.contains(want), "{}: {}", n, e);
+    }
+}
+
+#[test]
+fn json_tags_go_where_they_mean_something() {
+    let e = run_err("json_on_fn", "@json function f(): void {}\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("`@json` tags a struct"), "{}", e);
+    let e = run_err("json_field_top", "@field(\"x\") struct P {}\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("goes inside an `@json` struct"), "{}", e);
+    let e = run_err("json_field_lit", "@json struct P { @field(x) a: i32 }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("as a string literal"), "{}", e);
 }

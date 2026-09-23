@@ -1,6 +1,6 @@
 //! The binZ standard library: `binz/io`, `binz/string`, `binz/int`,
-//! `binz/float`, `binz/container`, `binz/map`, `binz/random` and
-//! `binz/test`.
+//! `binz/float`, `binz/container`, `binz/map`, `binz/random`, `binz/test`
+//! and `binz/json`.
 //!
 //! A module is made visible with `import binz/<name>;` and every one of its
 //! members is then reached as `<name>.<member>`. That is the only spelling:
@@ -37,7 +37,7 @@ use crate::types::{Kind, Type};
 /// Every module, in the order they are documented. The `binz/` prefix is
 /// part of the import path and is not repeated here.
 pub const MODULES: &[&str] =
-    &["io", "string", "int", "float", "container", "map", "random", "test"];
+    &["io", "string", "int", "float", "container", "map", "random", "test", "json"];
 
 pub type NativeSig = fn() -> Type;
 
@@ -153,6 +153,13 @@ pub const FORMS: &[Form] = &[
     // written down -- both are forms.
     Form { module: "test", name: "equal", id: B_TEST_EQUAL, arity: 2 },
     Form { module: "test", name: "calls", id: B_TEST_CALLS, arity: 1 },
+    // -------------------------------------------------------- binz/json
+    // `json.parse(text, &value)` and `json.stringify(value, &text)`, over
+    // any `@json` struct -- which is why they are forms. Both answer an
+    // `Error`, and both leave the destination untouched when it is not
+    // `code == 0`, so a failed call never hands back half a value.
+    Form { module: "json", name: "parse", id: B_JSON_PARSE, arity: 2 },
+    Form { module: "json", name: "stringify", id: B_JSON_STRINGIFY, arity: 2 },
 ];
 
 pub fn is_module(name: &str) -> bool {
@@ -191,6 +198,10 @@ pub const MISUSED: &[(&str, &str, &str)] = &[
     ("map", "pop", "a map has no positions"),
     ("map", "values", "read `m[key]` while walking `map.keys(m)`"),
     ("container", "keys", "only a map has keys"),
+    ("json", "encode", "write `json.stringify(value, &text)`"),
+    ("json", "marshal", "write `json.stringify(value, &text)`"),
+    ("json", "decode", "write `json.parse(text, &value)`"),
+    ("json", "unmarshal", "write `json.parse(text, &value)`"),
 ];
 
 pub fn misused(module: &str, name: &str) -> Option<&'static str> {

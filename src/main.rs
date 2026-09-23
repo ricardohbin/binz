@@ -2,6 +2,7 @@ mod ast;
 mod bytecode;
 mod compiler;
 mod error;
+mod json;
 mod lexer;
 mod loader;
 mod obj;

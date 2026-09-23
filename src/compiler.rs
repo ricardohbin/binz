@@ -104,6 +104,11 @@ pub struct Compiler {
     /// What each stub replaces, by stub function id -- so a stub body can be
     /// stopped from calling the function it is standing in for.
     stub_targets: HashMap<usize, usize>,
+    /// The JSON schema of every `@json` struct a `json.*` call reaches, and
+    /// the schema index of each by struct id. Built on first use, so a
+    /// struct that is tagged but never parsed costs the artifact nothing.
+    schemas: Vec<Schema>,
+    schema_ids: HashMap<usize, u32>,
 
     // state of the function currently being compiled
     code: Vec<u8>,
@@ -148,6 +153,8 @@ fn compile_with(prog: &Program, mode: Mode) -> CResult<Module> {
         stub_ids: HashMap::new(),
         tests: Vec::new(),
         stub_targets: HashMap::new(),
+        schemas: Vec::new(),
+        schema_ids: HashMap::new(),
         cur_test: None,
         stub_n: 0,
         stub_ok: false,
@@ -157,7 +164,8 @@ fn compile_with(prog: &Program, mode: Mode) -> CResult<Module> {
         files: prog.files.iter().map(|_| FileScope::default()).collect(),
         displays: prog.files.iter().map(|f| f.display.clone()).collect(),
         cur: prog.entry,
-        structs: Vec::new(),
+        // `Error` is struct 0 in every program, declared by binZ itself.
+        structs: vec![error_struct()],
         sigs: Vec::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
@@ -271,6 +279,7 @@ impl Compiler {
             funcs: funcs.into_iter().map(|f| f.expect("every signature got a body")).collect(),
             entry: entry.map(|e| e as u32),
             tests: std::mem::take(&mut self.tests),
+            schemas: std::mem::take(&mut self.schemas),
         })
     }
 
@@ -445,9 +454,19 @@ impl Compiler {
 
     // 1. struct names
     fn declare_structs(&mut self, f: &SourceFile) -> CResult<()> {
+        // `Error` is the one type every file can name without declaring it,
+        // so it is in every file's table before any of the file's own.
+        self.files[self.cur].struct_ids.insert("Error".to_string(), ERROR_ID);
         for item in &f.items {
             if let Item::Struct(sd) = item {
                 self.check_free(&sd.name, sd.span, "the name of a struct")?;
+                if sd.name == "Error" {
+                    return Err(CompileError::new(
+                        "`Error` is declared by binZ itself -- `reason: str, stacktrace: str, \
+                         code: i32` -- so a program cannot declare another one",
+                        sd.span,
+                    ));
+                }
                 if self.files[self.cur].struct_ids.contains_key(&sd.name) {
                     return Err(CompileError::new(
                         format!("struct `{}` is already defined", sd.name),
@@ -461,6 +480,7 @@ impl Compiler {
                     fields: Vec::new(),
                     size: 0,
                     laid_out: false,
+                    json: sd.json.is_some(),
                 });
             }
         }
@@ -487,12 +507,124 @@ impl Compiler {
                             fl.ty.span(),
                         ));
                     }
-                    fields.push(FieldInfo { name: fl.name.clone(), ty, offset: 0 });
+                    let key = self.json_key(sd, fl, &fields)?;
+                    if sd.json.is_some() {
+                        if let Err(why) = self.json_holds(&ty) {
+                            return Err(CompileError::new(
+                                format!(
+                                    "field `{}` of the `@json` struct `{}` is a `{}`, and {}",
+                                    fl.name,
+                                    sd.name,
+                                    self.tn(&ty),
+                                    why
+                                ),
+                                fl.ty.span(),
+                            ));
+                        }
+                    }
+                    fields.push(FieldInfo { name: fl.name.clone(), ty, offset: 0, key });
                 }
                 self.structs[id].fields = fields;
             }
         }
         Ok(())
+    }
+
+    /// The JSON key of one field: its own name, or what `@field` says. A
+    /// rename exists only to say something the name cannot, so `@field` is
+    /// refused outside an `@json` struct and when it repeats the name.
+    fn json_key(&self, sd: &StructDef, fl: &FieldDef, before: &[FieldInfo]) -> CResult<String> {
+        let key = match &fl.key {
+            None => fl.name.clone(),
+            Some((k, ksp)) => {
+                if sd.json.is_none() {
+                    return Err(CompileError::new(
+                        format!(
+                            "`@field` renames a JSON key, and `{}` is not tagged `@json`; \
+                             write `@json struct {}`",
+                            sd.name, sd.name
+                        ),
+                        *ksp,
+                    ));
+                }
+                if *k == fl.name {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is already the JSON key of field `{}`; a field is written \
+                             under its own name unless `@field` says otherwise, so drop the tag",
+                            k, fl.name
+                        ),
+                        *ksp,
+                    ));
+                }
+                k.clone()
+            }
+        };
+        if let Some(other) = before.iter().find(|f| f.key == key) {
+            return Err(CompileError::new(
+                format!(
+                    "fields `{}` and `{}` of `{}` would both be the JSON key \"{}\"",
+                    other.name, fl.name, sd.name, key
+                ),
+                fl.span,
+            ));
+        }
+        Ok(key)
+    }
+
+    /// Whether a field of this type can be read from and written to JSON,
+    /// and if not, why. Checked where the struct is declared, so an `@json`
+    /// struct is always one `json.parse` and `json.stringify` accept.
+    fn json_holds(&self, t: &Type) -> Result<(), String> {
+        match t {
+            Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::Str => Ok(()),
+            Type::Struct(id) if self.structs[*id].json => Ok(()),
+            Type::Struct(id) => Err(format!(
+                "a nested struct crosses the wire only when it is tagged too; write `@json struct {}`",
+                self.structs[*id].name
+            )),
+            Type::Array(elem, _) | Type::Container(Kind::Vector, elem) => self.json_holds(elem),
+            Type::Container(..) => Err("a JSON array is read into `Vector<T>` or `[T; N]`".to_string()),
+            Type::Map(..) => Err("a JSON object is read into an `@json` struct".to_string()),
+            Type::Ptr(_) => Err("an address means nothing outside this process".to_string()),
+            Type::Fn(..) => Err("a function is not data".to_string()),
+            Type::Void => unreachable!("a field is never `void`"),
+        }
+    }
+
+    /// The schema index of an `@json` struct, building it -- and the schemas
+    /// of the structs it holds -- on first use.
+    fn schema_of(&mut self, id: usize) -> u32 {
+        if let Some(i) = self.schema_ids.get(&id) {
+            return *i;
+        }
+        let info = self.structs[id].clone();
+        let fields = info
+            .fields
+            .iter()
+            .map(|f| JField { key: f.key.clone(), offset: f.offset, ty: self.jtype_of(&f.ty) })
+            .collect();
+        let i = self.schemas.len() as u32;
+        self.schemas.push(Schema { name: info.name.clone(), size: info.size, fields });
+        self.schema_ids.insert(id, i);
+        i
+    }
+
+    fn jtype_of(&mut self, t: &Type) -> JType {
+        match t {
+            Type::Bool => JType::Bool,
+            Type::I32 => JType::I32,
+            Type::I64 => JType::I64,
+            Type::F64 => JType::F64,
+            Type::Str => JType::Str,
+            Type::Struct(id) => JType::Struct(self.schema_of(*id)),
+            Type::Array(elem, n) => {
+                let size = self.size_of(elem);
+                JType::Array(Box::new(self.jtype_of(elem)), *n, size)
+            }
+            Type::Container(Kind::Vector, elem) => JType::Vector(Box::new(self.jtype_of(elem))),
+            _ => unreachable!("`json_holds` admitted `{}`", self.tn(t)),
+        }
     }
 
     // 3. layouts (detects value-recursive structs)
@@ -822,6 +954,23 @@ impl Compiler {
         }
     }
 
+    /// A condition is a `bool`, and nothing else is truthy -- not even an
+    /// `Error`, which is the one value a program is most tempted to test
+    /// bare, so it gets the line that does work.
+    fn expect_cond(&self, got: &Type, span: Span, what: &str) -> CResult<()> {
+        if *got == Type::Struct(ERROR_ID) {
+            return Err(CompileError::new(
+                format!(
+                    "{}: an `Error` is not a condition, and binZ has no truthiness; \
+                     write `if (err.code != 0)`",
+                    what
+                ),
+                span,
+            ));
+        }
+        self.expect_type(&Type::Bool, got, span, what)
+    }
+
     // ------------------------------------------------------------ emitting
 
     fn emit(&mut self, b: u8) {
@@ -1147,7 +1296,7 @@ impl Compiler {
             Stmt::If { cond, then, els, .. } => {
                 let mark = self.next_slot;
                 let ct = self.compile_expr(cond, Some(&Type::Bool))?;
-                self.expect_type(&Type::Bool, &ct, cond.span(), "in `if` condition")?;
+                self.expect_cond(&ct, cond.span(), "in `if` condition")?;
                 self.next_slot = mark;
                 let else_jump = self.emit_jump(OP_JMP_IF_FALSE);
                 self.compile_block(then)?;
@@ -1166,7 +1315,7 @@ impl Compiler {
                 let top = self.code.len();
                 let mark = self.next_slot;
                 let ct = self.compile_expr(cond, Some(&Type::Bool))?;
-                self.expect_type(&Type::Bool, &ct, cond.span(), "in `while` condition")?;
+                self.expect_cond(&ct, cond.span(), "in `while` condition")?;
                 self.next_slot = mark;
                 let exit = self.emit_jump(OP_JMP_IF_FALSE);
                 self.compile_block(body)?;
@@ -1908,6 +2057,9 @@ impl Compiler {
         if module == "test" {
             return self.compile_test_form(member, id, args, span);
         }
+        if module == "json" {
+            return self.compile_json_form(id, args);
+        }
         let ct = self.compile_expr(&args[0], None)?;
 
         // A map is not a container. It is reached only by key, and every
@@ -2242,6 +2394,83 @@ impl Compiler {
         Ok(Type::Void)
     }
 
+    /// `json.parse(text, &value)` and `json.stringify(value, &text)`. The
+    /// `Error` either answers is written into a temporary the call reserves,
+    /// exactly as a function returning a struct writes into its caller's --
+    /// and the schema of the `@json` struct is pushed last, as an `i32`.
+    fn compile_json_form(&mut self, id: u8, args: &[Expr]) -> CResult<Type> {
+        let dst = self.reserve(ERROR_SIZE);
+        self.emit_op_u32(OP_ADDR_LOCAL, dst);
+        let sid = if id == B_JSON_PARSE {
+            let t = self.compile_expr(&args[0], Some(&Type::Str))?;
+            self.expect_type(&Type::Str, &t, args[0].span(), "in `json.parse`")?;
+            let t = self.compile_expr(&args[1], None)?;
+            match t {
+                Type::Ptr(inner) => self.json_struct(&inner, "json.parse", args[1].span())?,
+                Type::Struct(_) => {
+                    return Err(CompileError::new(
+                        "`json.parse` fills a struct in place, so it takes its address: \
+                         write `json.parse(text, &value)`",
+                        args[1].span(),
+                    ))
+                }
+                other => self.json_struct(&other, "json.parse", args[1].span())?,
+            }
+        } else {
+            let t = self.compile_expr(&args[0], None)?;
+            let sid = match t {
+                Type::Ptr(_) => {
+                    return Err(CompileError::new(
+                        "`json.stringify` reads the struct itself; pass it by value, as in \
+                         `json.stringify(value, &text)`",
+                        args[0].span(),
+                    ))
+                }
+                other => self.json_struct(&other, "json.stringify", args[0].span())?,
+            };
+            let t = self.compile_expr(&args[1], None)?;
+            if t != Type::Ptr(Box::new(Type::Str)) {
+                return Err(CompileError::new(
+                    format!(
+                        "`json.stringify` writes the text through a `*str`, found `{}`; \
+                         write `json.stringify(value, &text)` with `var text: str`",
+                        self.tn(&t)
+                    ),
+                    args[1].span(),
+                ));
+            }
+            sid
+        };
+        self.emit(OP_PUSH_I32);
+        self.emit_u32(sid);
+        self.emit(OP_BUILTIN);
+        self.emit(id);
+        Ok(Type::Struct(ERROR_ID))
+    }
+
+    /// The schema of `t`, which has to be an `@json` struct.
+    fn json_struct(&mut self, t: &Type, what: &str, span: Span) -> CResult<u32> {
+        match t {
+            Type::Struct(id) if self.structs[*id].json => Ok(self.schema_of(*id)),
+            Type::Struct(id) => Err(CompileError::new(
+                format!(
+                    "`{}` is not tagged `@json`, so `{}` cannot read it; write `@json struct {}`",
+                    self.structs[*id].name, what, self.structs[*id].name
+                ),
+                span,
+            )),
+            other => Err(CompileError::new(
+                format!(
+                    "`{}` reads and writes an `@json` struct, found `{}`; the top of a JSON \
+                     document is an object, and an object is a struct",
+                    what,
+                    self.tn(other)
+                ),
+                span,
+            )),
+        }
+    }
+
     /// `stub math.add(a: i32, b: i32): i32 { ... }`.
     ///
     /// A stub replaces the *function*, not the call: every path that reaches
@@ -2571,8 +2800,11 @@ fn fn_named<'a>(f: &'a SourceFile, name: &str) -> Option<&'a FnDef> {
 
 /// The first struct a type mentions, however deeply. Struct ids are per file,
 /// so this is what decides whether a signature can cross a module boundary.
+///
+/// `Error` is not one: binZ declares it, so every file can already name it.
 fn struct_in(t: &Type) -> Option<usize> {
     match t {
+        Type::Struct(id) if *id == ERROR_ID => None,
         Type::Struct(id) => Some(*id),
         Type::Ptr(inner) | Type::Array(inner, _) | Type::Container(_, inner) => struct_in(inner),
         Type::Map(_, k, v) => struct_in(k).or_else(|| struct_in(v)),

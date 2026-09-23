@@ -10,7 +10,8 @@ and backend, emitting a `.binzc` bytecode artifact executed by a stack VM in
 directory; v0.1 works end to end, containers landed 2026-09-11, and `HashMap`,
 the standard library, `binz/map` and `SortedMap` all landed 2026-09-14, and
 local modules (`import @root/...`) on 2026-09-15, and the test library
-(`@test`, `binz test`, `stub`) on 2026-09-17.
+(`@test`, `binz test`, `stub`) on 2026-09-17, and `binz/json` + the built-in
+`Error` on 2026-09-23.
 
 **The one invariant: there is exactly ONE way to do one thing.** Every syntax
 question gets settled by that rule first, before taste. When proposing anything
@@ -135,13 +136,25 @@ does not go in.
   `Cell` on the VM, the only stdlib member with state, seeded through
   `RandomState` so binZ still has no dependencies; the range comes from the
   **high** bits, since the low ones repeated across runs.
+- **`binz/json` and `Error`, 2026-09-23 — his ask, his syntax.** `@json
+  struct` + `@field("key")` on a field; unmarked fields use their own name,
+  unknown JSON keys are skipped, a missing one is an error. `json.parse(text,
+  &p): Error` and `json.stringify(p, &text): Error` — the Error is the return
+  value because binZ has no tuples. **`Error { reason: str, stacktrace: str,
+  code: i32 }` is struct id 0, declared by binZ, visible in every file and the
+  only type that crosses a module boundary.** `code 0` = success; 1 syntax,
+  2 type, 3 missing, 4 duplicate key, 5 NaN/inf. The check is
+  `if (err.code != 0)`: **his `if (err)` was refused to keep "conditions are
+  `bool`"**, flagged. A failed call leaves the destination untouched. The
+  schema of each `@json` struct lives in the artifact (VERSION 5). Rationale
+  in `memory/2026-09-23.md`.
 - **Standard library, 2026-09-14**: `import binz/io;` and every member is
   reached as `io.print`. The binding is the last path segment, **always** —
   no alias, no wildcard, no bare import — so two modules may both define
   `find` and there is no resolution rule to learn. An import owns its binding for the
   whole *file* (nothing else in it may be named `io`); imports come first in
   a file.
-  Modules: `io` `string` `int` `float` `container` `map` `random` `test`. **Naming, his call
+  Modules: `io` `string` `int` `float` `container` `map` `random` `test` `json`. **Naming, his call
   2026-09-14: modules lowercase, members `camelCase` (`startsWith`,
   `canParse`), types `PascalCase`** — a test in `src/stdlib.rs` enforces it.
   **`size`, `find` and
@@ -269,6 +282,13 @@ does not go in.
 - **A `while` still has no header**, so a counter needs the enclosing-block
   idiom. Giving the loop its own binding would be a second way to do the same
   thing, so it waits for his word. Flagged 2026-09-21.
+- **`if (err)` truthiness for `Error`** — he wrote it; I kept `bool`-only
+  conditions and made `if (err)` an error naming `err.code != 0`. Flagged
+  2026-09-23.
+- **`json.parse` needs a fully initialised `var` to fill** (no uninitialised
+  declarations), so big structs need a `blank()` helper. Flagged 2026-09-23.
+- **No `HashMap<str, V>` <-> JSON object, no optional fields** in
+  `binz/json`. Flagged 2026-09-23.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
 - `.binzc` artifact extension was my extrapolation from his `.binz` request.
 

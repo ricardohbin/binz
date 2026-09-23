@@ -1,10 +1,10 @@
 //! The binZ bytecode artifact (`.bzc`) and its instruction set.
 //!
 //! Layout is little-endian throughout:
-//!   magic "BINZ" | version u32 | strings | functions | entry u32
+//!   magic "BINZ" | version u32 | strings | functions | entry | tests | schemas
 
 pub const MAGIC: &[u8; 4] = b"BINZ";
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 pub const OP_PUSH_I32: u8 = 0x01;
 pub const OP_PUSH_I64: u8 = 0x02;
@@ -92,6 +92,10 @@ pub const B_INT_MIN: u8 = 13;
 pub const B_INT_MAX: u8 = 14;
 pub const B_TEST_EQUAL: u8 = 15;
 pub const B_TEST_CALLS: u8 = 16;
+/// `json.parse` / `json.stringify`. Both find their schema as an `i32` pushed
+/// last, so the `@json` struct a call is about needs no opcode of its own.
+pub const B_JSON_PARSE: u8 = 17;
+pub const B_JSON_STRINGIFY: u8 = 18;
 
 pub fn builtin_name(id: u8) -> &'static str {
     crate::stdlib::form_name(id)
@@ -117,6 +121,40 @@ pub struct FnMeta {
     pub code: Vec<u8>,
 }
 
+/// The shape of a JSON value as a field of an `@json` struct holds it --
+/// everything the virtual machine needs to read or write one, since the
+/// bytecode itself carries no types.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JType {
+    Bool,
+    I32,
+    I64,
+    F64,
+    Str,
+    /// Another `@json` struct, by index into `Module::schemas`.
+    Struct(u32),
+    /// `[T; N]`: exactly `len` elements of `elem_size` slots each.
+    Array(Box<JType>, u32, u32),
+    /// `Vector<T>`: any number of one-slot elements.
+    Vector(Box<JType>),
+}
+
+#[derive(Debug, Clone)]
+pub struct JField {
+    pub key: String,
+    pub offset: u32,
+    pub ty: JType,
+}
+
+/// One `@json` struct, with its fields in declaration order -- which is the
+/// order `json.stringify` writes their keys in.
+#[derive(Debug, Clone)]
+pub struct Schema {
+    pub name: String,
+    pub size: u32,
+    pub fields: Vec<JField>,
+}
+
 /// One `@test` function, as `binz test` reports it.
 #[derive(Debug, Clone)]
 pub struct TestMeta {
@@ -135,6 +173,8 @@ pub struct Module {
     pub entry: Option<u32>,
     /// Empty unless the module was compiled by `binz test`.
     pub tests: Vec<TestMeta>,
+    /// Every `@json` struct a `json.parse` or `json.stringify` reaches.
+    pub schemas: Vec<Schema>,
 }
 
 // ------------------------------------------------------------- serialization
@@ -153,6 +193,29 @@ impl Writer {
     fn str(&mut self, s: &str) {
         self.u32(s.len() as u32);
         self.buf.extend_from_slice(s.as_bytes());
+    }
+    fn jtype(&mut self, t: &JType) {
+        match t {
+            JType::Bool => self.u8(0),
+            JType::I32 => self.u8(1),
+            JType::I64 => self.u8(2),
+            JType::F64 => self.u8(3),
+            JType::Str => self.u8(4),
+            JType::Struct(i) => {
+                self.u8(5);
+                self.u32(*i);
+            }
+            JType::Array(elem, len, size) => {
+                self.u8(6);
+                self.u32(*len);
+                self.u32(*size);
+                self.jtype(elem);
+            }
+            JType::Vector(elem) => {
+                self.u8(7);
+                self.jtype(elem);
+            }
+        }
     }
 }
 
@@ -190,6 +253,17 @@ pub fn serialize(m: &Module) -> Vec<u8> {
         w.str(&t.file);
         w.u32(t.func);
     }
+    w.u32(m.schemas.len() as u32);
+    for sc in &m.schemas {
+        w.str(&sc.name);
+        w.u32(sc.size);
+        w.u32(sc.fields.len() as u32);
+        for f in &sc.fields {
+            w.str(&f.key);
+            w.u32(f.offset);
+            w.jtype(&f.ty);
+        }
+    }
     w.buf
 }
 
@@ -218,6 +292,28 @@ impl<'a> Reader<'a> {
         let n = self.u32()? as usize;
         let b = self.take(n)?;
         String::from_utf8(b.to_vec()).map_err(|_| "invalid utf-8 in artifact".to_string())
+    }
+    fn jtype(&mut self, depth: u32) -> Result<JType, String> {
+        // A field type nests once per `[T; N]` or `Vector<T>` written, so a
+        // deep one is a corrupt artifact rather than a program.
+        if depth > 64 {
+            return Err("corrupt JSON schema in artifact".into());
+        }
+        Ok(match self.u8()? {
+            0 => JType::Bool,
+            1 => JType::I32,
+            2 => JType::I64,
+            3 => JType::F64,
+            4 => JType::Str,
+            5 => JType::Struct(self.u32()?),
+            6 => {
+                let len = self.u32()?;
+                let size = self.u32()?;
+                JType::Array(Box::new(self.jtype(depth + 1)?), len, size)
+            }
+            7 => JType::Vector(Box::new(self.jtype(depth + 1)?)),
+            _ => return Err("corrupt JSON schema in artifact".into()),
+        })
     }
 }
 
@@ -260,7 +356,22 @@ pub fn deserialize(buf: &[u8]) -> Result<Module, String> {
         let func = r.u32()?;
         tests.push(TestMeta { name, file, func });
     }
-    Ok(Module { strings, funcs, entry, tests })
+    let n_schemas = r.u32()? as usize;
+    let mut schemas = Vec::with_capacity(n_schemas);
+    for _ in 0..n_schemas {
+        let name = r.str()?;
+        let size = r.u32()?;
+        let n_fields = r.u32()? as usize;
+        let mut fields = Vec::with_capacity(n_fields);
+        for _ in 0..n_fields {
+            let key = r.str()?;
+            let offset = r.u32()?;
+            let ty = r.jtype(0)?;
+            fields.push(JField { key, offset, ty });
+        }
+        schemas.push(Schema { name, size, fields });
+    }
+    Ok(Module { strings, funcs, entry, tests, schemas })
 }
 
 // ------------------------------------------------------------ disassembler
@@ -287,6 +398,11 @@ pub fn disassemble(m: &Module) -> String {
     }
     for (i, s) in m.strings.iter().enumerate() {
         out.push_str(&format!("; str[{}] = {:?}\n", i, s));
+    }
+    for (i, sc) in m.schemas.iter().enumerate() {
+        let keys: Vec<String> =
+            sc.fields.iter().map(|f| format!("{:?}@{}", f.key, f.offset)).collect();
+        out.push_str(&format!("; json[{}] = {} {{ {} }}\n", i, sc.name, keys.join(", ")));
     }
     for (fi, f) in m.funcs.iter().enumerate() {
         out.push_str(&format!(

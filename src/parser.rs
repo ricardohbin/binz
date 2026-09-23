@@ -73,9 +73,9 @@ impl Parser {
         }
         while self.peek() != &Tok::Eof {
             match self.peek() {
-                Tok::Struct => items.push(Item::Struct(self.parse_struct()?)),
+                Tok::Struct => items.push(Item::Struct(self.parse_struct(None)?)),
                 Tok::Function => items.push(Item::Fn(self.parse_fn(false)?)),
-                Tok::At => items.push(Item::Fn(self.parse_tagged_fn()?)),
+                Tok::At => items.push(self.parse_tagged()?),
                 Tok::Import => {
                     return Err(CompileError::new(
                         "every `import` goes at the top of the file, before the first `struct` or `function`",
@@ -102,18 +102,42 @@ impl Parser {
         Ok(items)
     }
 
-    /// `@test function sumsTwoPositives(): void { ... }`. The tag is the one
-    /// thing that marks a test, which is why the name may not repeat it.
-    fn parse_tagged_fn(&mut self) -> CResult<FnDef> {
+    /// `@test function sumsTwoPositives(): void { ... }` or
+    /// `@json struct Point { ... }` -- the two tags an item can carry, each
+    /// on the one kind of item it means something for.
+    fn parse_tagged(&mut self) -> CResult<Item> {
         let at = self.span();
         self.expect(Tok::At)?;
         let (tag, tspan) = self.ident()?;
-        if tag != "test" {
-            return Err(CompileError::new(
-                format!("`@{}` is not a tag; `@test` is the only one", tag),
+        match tag.as_str() {
+            "test" => self.parse_test_fn(at).map(Item::Fn),
+            "json" => {
+                if self.peek() != &Tok::Struct {
+                    return Err(CompileError::new(
+                        format!(
+                            "`@json` tags a struct, found `{}`; a function is not data",
+                            describe(self.peek())
+                        ),
+                        self.span(),
+                    ));
+                }
+                self.parse_struct(Some(at)).map(Item::Struct)
+            }
+            "field" => Err(CompileError::new(
+                "`@field` renames the JSON key of one field, so it goes inside an `@json` struct, \
+                 right before that field",
+                at,
+            )),
+            _ => Err(CompileError::new(
+                format!("`@{}` is not a tag; binZ has `@test` and `@json`", tag),
                 tspan,
-            ));
+            )),
         }
+    }
+
+    /// The test-shaped half of `parse_tagged`. The tag is the one thing that
+    /// marks a test, which is why the name may not repeat it.
+    fn parse_test_fn(&mut self, at: Span) -> CResult<FnDef> {
         if self.peek() == &Tok::Struct {
             return Err(CompileError::new(
                 "`@test` tags a function, not a struct",
@@ -220,23 +244,58 @@ impl Parser {
         Ok(path)
     }
 
-    fn parse_struct(&mut self) -> CResult<StructDef> {
-        let span = self.span();
+    /// `struct Point { x: i32 }`, and the same after `@json`, whose fields
+    /// may each carry one `@field("key")`. Whether `@field` is legal is the
+    /// compiler's business; the shape is this.
+    fn parse_struct(&mut self, json: Option<Span>) -> CResult<StructDef> {
+        let span = json.unwrap_or_else(|| self.span());
         self.expect(Tok::Struct)?;
         let (name, _) = self.ident()?;
         self.expect(Tok::LBrace)?;
         let mut fields = Vec::new();
         while self.peek() != &Tok::RBrace {
+            let key = if self.peek() == &Tok::At { Some(self.parse_field_tag()?) } else { None };
             let (fname, fspan) = self.ident()?;
             self.expect(Tok::Colon)?;
             let ty = self.parse_type()?;
-            fields.push(Param { name: fname, ty, span: fspan });
+            fields.push(FieldDef { name: fname, ty, span: fspan, key });
             if !self.eat(&Tok::Comma) {
                 break;
             }
         }
         self.expect(Tok::RBrace)?;
-        Ok(StructDef { name, fields, span })
+        Ok(StructDef { name, fields, span, json })
+    }
+
+    /// `@field("some_field")`: the JSON key of the field that follows.
+    fn parse_field_tag(&mut self) -> CResult<(String, Span)> {
+        let at = self.span();
+        self.expect(Tok::At)?;
+        let (tag, tspan) = self.ident()?;
+        if tag != "field" {
+            return Err(CompileError::new(
+                format!("`@{}` is not a field tag; a field takes `@field(\"key\")` only", tag),
+                tspan,
+            ));
+        }
+        self.expect(Tok::LParen)?;
+        let key = match self.peek().clone() {
+            Tok::Str(k) => {
+                self.bump();
+                k
+            }
+            other => {
+                return Err(CompileError::new(
+                    format!(
+                        "`@field` takes the JSON key as a string literal, found `{}`",
+                        describe(&other)
+                    ),
+                    self.span(),
+                ))
+            }
+        };
+        self.expect(Tok::RParen)?;
+        Ok((key, at))
     }
 
     fn parse_fn(&mut self, is_test: bool) -> CResult<FnDef> {
