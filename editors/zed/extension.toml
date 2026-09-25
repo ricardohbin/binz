@@ -14,5 +14,5 @@ repository = "https://github.com/ricardohbin/binz"
 #   repository = "file:///Users/ricardo.bin/dev/binlanguage"
 [grammars.binz]
 repository = "https://github.com/ricardohbin/binz"
-rev = "REPLACE_WITH_COMMIT_SHA"
+rev = "caecb4d734f49b975f196b6a1cb9e176bebf0b32"
 path = "editors/tree-sitter-binz"
