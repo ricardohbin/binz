@@ -1,0 +1,18 @@
+id = "binz"
+name = "binZ"
+description = "binZ language support: syntax highlighting, brackets, indentation and outline."
+version = "0.1.0"
+schema_version = 1
+authors = ["Ricardo Bin"]
+repository = "https://github.com/ricardohbin/binz"
+
+# The grammar lives in this same repository, under `editors/tree-sitter-binz`.
+# Zed clones `repository` at `rev` and builds `path/src/parser.c`, so `rev` has
+# to be a commit that already contains the generated parser.
+#
+# For local development, point `repository` at your checkout instead:
+#   repository = "file:///Users/ricardo.bin/dev/binlanguage"
+[grammars.binz]
+repository = "https://github.com/ricardohbin/binz"
+rev = "REPLACE_WITH_COMMIT_SHA"
+path = "editors/tree-sitter-binz"
