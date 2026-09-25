@@ -26,7 +26,7 @@ Every design decision below falls out of that rule.
 | Only `while` for loops | `for`/`do`/`foreach` are the same loop |
 | No `+=`, `++`, `--` | `x = x + 1` |
 | Conditions are parenthesised and must be `bool` | no truthiness, no `if x = 0` trap |
-| Struct literals list every field, in declaration order | one shape per struct |
+| Struct literals list every field, in declaration order — or none, as `Point{}`, for all defaults | one shape per struct, and no literal that leaves the reader guessing which fields were skipped |
 | `const` / `var` — no third form | immutable by default in spirit |
 | No `null` | a `*T` always points at something |
 | `c[i]` indexes every container | one spelling for "the element at i", by position for a sequence and by key for a map |
@@ -44,6 +44,8 @@ Every design decision below falls out of that rule.
 | A test is tagged `@test` and named for what it asserts | the tag says it is a test, so the name may not say it again |
 | `test.equal` is the one assertion | `equal` states what was expected; `test.fail` covers what equality cannot say |
 | A stub replaces a module's function, written at the top of the test | mocking without interfaces or an argument threaded through three layers |
+| A call that can fail answers an `Error`, and `code == 0` means it did not | one error convention, and no truthiness: `if (err.code != 0)` |
+| Only an `@json` struct crosses the wire, and a field is its own key unless `@field` says otherwise | `@field("year")` on `year` is refused — it would be a second spelling of the default |
 
 ## Install & use
 
@@ -167,6 +169,13 @@ struct Point { x: i64, y: i64 }
 var a: Point = Point { x: 1, y: 2 };
 var b: Point = a;        // full copy, not an alias
 ```
+
+A literal names every field or none. `Point{}` sets every field to its
+default: `0`, `0.0`, `false`, `""`, an empty container or map, and the same
+again for a nested struct and for each element of an array (every element
+gets a container of its own). A pointer or a function has no default, since
+there is no `null`, so a struct holding one has to be written out in full.
+`Error{}` is therefore "no error".
 
 They are passed and returned by value too — a struct return is compiled with a
 hidden destination pointer, so no copy is left dangling.
@@ -413,6 +422,7 @@ words, and `container.add` does not stop you writing your own
 | `binz/map` | the six map verbs, [above](#maps) |
 | `binz/random` | `f64` `i32` — [below](#binzrandom) |
 | `binz/test` | `equal` `calls` `fail`, reachable only from a test — [below](#tests) |
+| `binz/json` | `parse` `stringify`, over any `@json` struct — [below](#binzjson) |
 
 ### Which members are values
 
@@ -519,6 +529,79 @@ function lookup(country: str): f64 {
 Without that stub, all a test can say about `total(100.0, "br")` is that it
 lands between `0.0` and `100.0` — which is what `examples/orders.binz` shows
 side by side.
+
+### binz/json
+
+A struct is read from and written to JSON only when it is tagged `@json`. A
+field is written under its own name; `@field` gives it another one, and that
+is all it does:
+
+```c
+import binz/io;
+import binz/json;
+
+@json
+struct Point {
+    @field("some_field")
+    someField: str,
+    year: i64
+}
+
+function main(): i32 {
+    var p: Point = Point{};          // every field at its default
+    var err: Error = json.parse("{\"some_field\": \"x\", \"year\": 2026}", &p);
+    if (err.code != 0) {
+        io.print(err.reason);
+        return 1;
+    }
+
+    var text: str = "";
+    err = json.stringify(p, &text);   // {"some_field":"x","year":2026}
+    return 0;
+}
+```
+
+Both calls answer an `Error`, the one struct binZ declares itself — every file
+can name it, and it crosses module boundaries, so your own functions can
+answer one too:
+
+```c
+struct Error {
+    reason: str,       // "`$.year`: expected an integer, found a string"
+    stacktrace: str,   // "at load\nat main" -- innermost first
+    code: i32,         // 0 when nothing went wrong
+}
+```
+
+On success `code` is `0` and the two strings are `""`. There is no `null` and
+no truthiness, so the check is always `err.code != 0`; `if (err)` is refused
+with that line. **A failed call leaves its destination untouched**: the value
+is read in full before a single slot is written.
+
+| `code` | Meaning |
+| --- | --- |
+| `0` | success |
+| `1` | the text is not JSON (the reason gives line and column) |
+| `2` | a value is the wrong type for its field — including `1.5` for an integer, a number too large for its field, and `null` |
+| `3` | a field of the struct has no key in the object |
+| `4` | an object names the same key twice |
+| `5` | `json.stringify` met NaN or an infinity, which JSON cannot spell |
+
+Rules, each one enforced at compile time where it can be:
+
+- A key in the JSON that the struct does not declare is **skipped**. A field
+  of the struct with no key in the JSON is **an error** (`3`) — without
+  `null` there is nothing to leave in it.
+- A field of an `@json` struct is `bool`, `i32`, `i64`, `f64`, `str`, another
+  `@json` struct, `[T; N]` (a JSON array of exactly `N`) or `Vector<T>`. A
+  pointer, a function, a set, a list or a map is refused where the struct is
+  declared.
+- `@field` belongs only inside an `@json` struct, may not repeat the field's
+  own name, and two fields may not end up on one key.
+- The top of the document is an object, because the value is a struct.
+- `json.stringify` writes compact JSON with keys in declaration order. There is
+  one spelling of a value, so there is no pretty-printer.
+- Numbers keep every digit: an `i64` field reads `9007199254740993` exactly.
 
 ### When a name is missing
 
@@ -777,6 +860,7 @@ src/stdlib.rs     the module table: what binz/io, binz/string, ... contain
 src/bytecode.rs   instruction set, .binzc serialization, disassembler
 src/vm.rs         stack VM
 src/obj.rs        heap storage: Vector / LinkedList / Set / SortedSet / HashMap / SortedMap
+src/json.rs       binz/json: an RFC 8259 reader and a writer, driven by the artifact's schemas
 ```
 
 The compiler is one pass: because binZ has no inference beyond literal typing,
@@ -829,6 +913,15 @@ makes a stub reach calls written anywhere in the graph. The redirect table is
 allocated only when a stub installs one, and the call counts only in a test
 run, so an ordinary program pays nothing for either existing.
 
+`binz/json` needs what the bytecode does not carry: the shape of a struct.
+So every `@json` struct a `json.*` call reaches gets a *schema* in the
+artifact — its keys, slot offsets and field types — and the call pushes the
+schema's index as its last argument before `OP_BUILTIN`. The `Error` is written
+into a temporary the call reserves, the same way a function returning a struct
+writes into its caller's. Parsing builds a tree first and only then fills the
+destination, which is why a failure leaves it untouched; nesting past 512
+levels is refused rather than recursed into.
+
 Runtime traps: division/remainder by zero, integer overflow, an index out of
 range, a map key that is not present, `pop` on an empty container, NaN
 used as a key, and dereferencing a pointer into a frame that has already been
@@ -837,7 +930,8 @@ popped.
 ### Artifact format
 
 Little-endian: `"BINZ"` magic, version, string pool, function table (name,
-parameter slot sizes, frame size, sret flag, code), entry index, test table.
+parameter slot sizes, frame size, sret flag, code), entry index, test table,
+JSON schema table.
 The entry index is optional and the test table is empty in everything
 `binz build` writes: both exist because a `binz test` compile has no `main`
 and carries the tests it found.
@@ -846,7 +940,8 @@ and carries the tests it found.
 
 Slices, user-written generics, closures, exported types (a module exports its
 functions only), methods, enums/unions, bitwise operators, and
-unsigned integers. The standard library is a scratch: no file or process I/O
+unsigned integers. `binz/json` reads into structs only: no JSON object into a
+`HashMap<str, V>`, no optional fields. The standard library is a scratch: no file or process I/O
 beyond `io.print`, no time. `binz/random` cannot be seeded, so a
 failing random case cannot be replayed. A test run has no setup, no teardown
 and no filter — `binz test <file>` runs everything it can reach. `cast<str>` formats

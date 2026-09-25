@@ -1,0 +1,69 @@
+// JSON. A struct crosses the wire only when it is tagged `@json`, and each
+// field is written under its own name unless `@field` gives it another.
+// `json.parse` and `json.stringify` both answer an `Error`, and both leave
+// their destination alone unless `code` is 0 -- so there is no half-read
+// value to guard against.
+
+import binz/io;
+import binz/json;
+import binz/test;
+
+@json
+struct Release {
+    @field("some_field")
+    someField: str,
+    year: i64,
+    tags: Vector<str>
+}
+
+function report(err: Error): void {
+    io.print("error " + cast<str>(err.code) + ": " + err.reason);
+    io.print(err.stacktrace);
+    return;
+}
+
+function main(): i32 {
+    var r: Release = Release{};
+    var err: Error = json.parse(
+        "{\"some_field\": \"binZ\", \"year\": 2026, \"tags\": [\"vm\", \"json\"], \"ignored\": true}",
+        &r
+    );
+    if (err.code != 0) {
+        report(err);
+        return 1;
+    }
+    io.print(r.someField + " " + cast<str>(r.year) + " " + r.tags[1]);
+
+    r.year = r.year + 1;
+    var text: str = "";
+    err = json.stringify(r, &text);
+    io.print(text);
+
+    // A string where an integer goes: the reason names the key, and `r` is
+    // exactly what it was before the call.
+    err = json.parse("{\"some_field\": \"x\", \"year\": \"soon\", \"tags\": []}", &r);
+    report(err);
+    io.print(r.someField);
+    return 0;
+}
+
+@test
+function readsWhatItWrites(): void {
+    var r: Release = Release{};
+    var text: str = "";
+    var err: Error = json.stringify(r, &text);
+    test.equal(text, "{\"some_field\":\"\",\"year\":0,\"tags\":[]}");
+    err = json.parse("{\"some_field\":\"a\",\"year\":7,\"tags\":[\"b\"]}", &r);
+    test.equal(err.code, 0);
+    test.equal(r.year, cast<i64>(7));
+    return;
+}
+
+@test
+function aMissingKeyIsCodeThree(): void {
+    var r: Release = Release{};
+    const err: Error = json.parse("{\"year\": 1, \"tags\": []}", &r);
+    test.equal(err.code, 3);
+    test.equal(err.reason, "`$.some_field` is missing");
+    return;
+}

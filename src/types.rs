@@ -121,6 +121,9 @@ pub struct FieldInfo {
     pub name: String,
     pub ty: Type,
     pub offset: u32,
+    /// The JSON key: the field's own name unless `@field("...")` renamed it.
+    /// Meaningful only in an `@json` struct.
+    pub key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +132,40 @@ pub struct StructInfo {
     pub fields: Vec<FieldInfo>,
     pub size: u32,
     pub laid_out: bool,
+    /// Tagged `@json`, and so accepted by `json.parse` / `json.stringify`.
+    pub json: bool,
+}
+
+/// `Error`, the one struct binZ itself declares, and the first type every
+/// file can name without declaring it. It is always struct id 0.
+///
+/// A call that can fail answers one: `code` is `0` when nothing went wrong,
+/// and then `reason` and `stacktrace` are both `""`. The layout is fixed,
+/// because the virtual machine writes one field by field.
+pub const ERROR_ID: usize = 0;
+pub const ERROR_REASON: u32 = 0;
+pub const ERROR_STACKTRACE: u32 = 1;
+pub const ERROR_CODE: u32 = 2;
+pub const ERROR_SIZE: u32 = 3;
+
+pub fn error_struct() -> StructInfo {
+    let field = |name: &str, ty: Type, offset: u32| FieldInfo {
+        name: name.to_string(),
+        ty,
+        offset,
+        key: name.to_string(),
+    };
+    StructInfo {
+        name: "Error".to_string(),
+        fields: vec![
+            field("reason", Type::Str, ERROR_REASON),
+            field("stacktrace", Type::Str, ERROR_STACKTRACE),
+            field("code", Type::I32, ERROR_CODE),
+        ],
+        size: ERROR_SIZE,
+        laid_out: true,
+        json: false,
+    }
 }
 
 /// Renders a type using the concrete source syntax, so diagnostics show

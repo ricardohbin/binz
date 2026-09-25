@@ -37,8 +37,22 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
-    pub fields: Vec<Param>,
+    pub fields: Vec<FieldDef>,
     pub span: Span,
+    /// Written `@json struct ...`. Only a tagged struct can be handed to
+    /// `json.parse` / `json.stringify`, so whether a type crosses the wire is
+    /// read off its declaration and not off the calls that happen to use it.
+    pub json: Option<Span>,
+}
+
+/// One field of a struct. `key` is the `"some_field"` of
+/// `@field("some_field")`: the JSON key, when it is not the field's own name.
+#[derive(Debug, Clone)]
+pub struct FieldDef {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub span: Span,
+    pub key: Option<(String, Span)>,
 }
 
 #[derive(Debug, Clone)]
