@@ -1,0 +1,22 @@
+{
+  "grammars": [
+    {
+      "name": "binz",
+      "camelcase": "Binz",
+      "scope": "source.binz",
+      "path": ".",
+      "file-types": [
+        "binz"
+      ],
+      "highlights": "../zed/languages/binz/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "binZ grammar for tree-sitter",
+    "links": {
+      "repository": "https://github.com/ricardohbin/binz"
+    }
+  }
+}

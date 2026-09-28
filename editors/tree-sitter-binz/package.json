@@ -1,0 +1,14 @@
+{
+  "name": "tree-sitter-binz",
+  "version": "0.1.0",
+  "description": "binZ grammar for tree-sitter",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.0"
+  }
+}

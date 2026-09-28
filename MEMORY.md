@@ -232,6 +232,13 @@ does not go in.
   set: require `build & test`, plus **Require branches to be up to date**,
   or a PR off a stale main can pass its own CI and still break main.
 
+- **Editor support, 2026-09-25**: `editors/tree-sitter-binz/` (grammar,
+  generated `src/` is committed on purpose) and `editors/zed/` (extension,
+  grammar via `path` in the same repo). **A new keyword or construct in the
+  lexer/parser needs a matching rule in `grammar.js`** and usually a line in
+  `highlights.scm`, then `tree-sitter generate` and a `rev` bump. Detail in
+  `memory/2026-09-25.md`.
+
 ## Open, not yet decided by him
 
 - **No `null`** — my call, not his. Un-C. He may want it back.
