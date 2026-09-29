@@ -1,6 +1,6 @@
 id = "binz"
 name = "binZ"
-description = "binZ language support: syntax highlighting, brackets, indentation and outline."
+description = "binZ language support: syntax highlighting, brackets, indentation, outline, completion and diagnostics."
 version = "0.1.0"
 schema_version = 1
 authors = ["Ricardo Bin"]
@@ -13,6 +13,12 @@ repository = "https://github.com/ricardohbin/binz"
 # For local development, point `repository` at your checkout instead:
 #   repository = "file:///Users/ricardo.bin/dev/binlanguage"
 [grammars.binz]
-repository = "https://github.com/ricardohbin/binz"
+repository = "file:///Users/ricardo.bin/dev/binlanguage"
 rev = "caecb4d734f49b975f196b6a1cb9e176bebf0b32"
 path = "editors/tree-sitter-binz"
+
+# `binz lsp`, started by `src/lib.rs`: completion, and the compiler's own
+# diagnostics as you type.
+[language_servers.binz]
+name = "binZ"
+languages = ["binZ"]
