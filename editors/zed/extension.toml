@@ -13,8 +13,8 @@ repository = "https://github.com/ricardohbin/binz"
 # For local development, point `repository` at your checkout instead:
 #   repository = "file:///Users/ricardo.bin/dev/binlanguage"
 [grammars.binz]
-repository = "file:///Users/ricardo.bin/dev/binlanguage"
-rev = "caecb4d734f49b975f196b6a1cb9e176bebf0b32"
+repository = "https://github.com/ricardohbin/binz"
+rev = "ec3f1eefa5004023a5fe577d86bff76c826bf731"
 path = "editors/tree-sitter-binz"
 
 # `binz lsp`, started by `src/lib.rs`: completion, and the compiler's own
