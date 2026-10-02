@@ -48,17 +48,27 @@ impl Program {
 
 pub fn load(entry: &str) -> CResult<Program> {
     let entry_path = PathBuf::from(entry);
+    let dir = entry_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    load_with(entry, dir, &HashMap::new())
+}
+
+/// The same, for the language server. The file being edited is not always
+/// the one `binz` will be handed, so `@root` is passed in rather than read
+/// off `entry`; and `overlay` holds the buffers of the editor by canonical
+/// path, which win over what is on disk.
+pub fn load_with(entry: &str, root: &Path, overlay: &HashMap<PathBuf, String>) -> CResult<Program> {
     // `@root` is resolved once, and absolutely, so a diagnostic about a file
     // that is not there can say where it looked.
-    let dir = entry_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let mut l = Loader { root, files: Vec::new(), done: HashMap::new(), open: Vec::new() };
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut l = Loader { root, overlay, files: Vec::new(), done: HashMap::new(), open: Vec::new() };
+    let entry_path = PathBuf::from(entry);
     let entry_idx = l.load(&entry_path, entry.to_string(), None)?;
     Ok(Program { files: l.files, entry: entry_idx })
 }
 
-struct Loader {
+struct Loader<'a> {
     root: PathBuf,
+    overlay: &'a HashMap<PathBuf, String>,
     files: Vec<SourceFile>,
     /// Canonical path -> index, so a file imported twice is compiled once.
     done: HashMap<PathBuf, usize>,
@@ -67,7 +77,7 @@ struct Loader {
     open: Vec<(PathBuf, String)>,
 }
 
-impl Loader {
+impl Loader<'_> {
     /// `blame` is the file and span of the `import` that asked for this one,
     /// so "cannot read" points at the line that named it.
     fn load(
@@ -101,9 +111,12 @@ impl Loader {
             return Err(fail(format!("import cycle: {}", chain.join(" -> "))));
         }
 
-        let src = match std::fs::read_to_string(real) {
-            Ok(s) => s,
-            Err(e) => return Err(fail(format!("cannot read `{}`: {}", display, e))),
+        let src = match self.overlay.get(&key) {
+            Some(s) => s.clone(),
+            None => match std::fs::read_to_string(real) {
+                Ok(s) => s,
+                Err(e) => return Err(fail(format!("cannot read `{}`: {}", display, e))),
+            },
         };
         let path = real.display().to_string();
         let items = Lexer::new(&src)

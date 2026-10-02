@@ -1,10 +1,12 @@
 mod ast;
 mod bytecode;
 mod compiler;
+mod complete;
 mod error;
 mod json;
 mod lexer;
 mod loader;
+mod lsp;
 mod obj;
 mod parser;
 mod stdlib;
@@ -23,6 +25,7 @@ usage:
   binz test  <file.binz>                    run every `@test` it can reach
   binz exec  <file.binzc>                   run an artifact
   binz dump  <file.binzc>                   disassemble an artifact
+  binz lsp                                  serve the language server on stdio
 ";
 
 /// Loads the file and everything it imports, then compiles the whole graph
@@ -131,6 +134,9 @@ fn run_tests(m: &bytecode::Module) -> i32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|a| a == "lsp").unwrap_or(false) {
+        exit(lsp::serve());
+    }
     if args.len() < 3 {
         eprint!("{}", USAGE);
         exit(2);

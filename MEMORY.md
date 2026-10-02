@@ -238,6 +238,14 @@ does not go in.
   lexer/parser needs a matching rule in `grammar.js`** and usually a line in
   `highlights.scm`, then `tree-sitter generate` and a `rev` bump. Detail in
   `memory/2026-09-25.md`.
+- **Language server, 2026-09-29**: `binz lsp` (stdio, no deps, reuses
+  `json.rs`) — completion from lossy tokens in `src/complete.rs`, diagnostics
+  from `compile_tests` over `loader::load_with` with editor buffers overlaid.
+  `@root` is guessed as the nearest dir where all local imports resolve.
+  Zed starts it via `editors/zed/src/lib.rs`. **A new keyword, tag or stdlib
+  module needs a look at `complete.rs`** (keyword lists are hardcoded; stdlib
+  members come from `NATIVES`/`FORMS` automatically). Detail in
+  `memory/2026-09-29.md`.
 
 ## Open, not yet decided by him
 

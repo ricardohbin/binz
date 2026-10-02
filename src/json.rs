@@ -41,8 +41,11 @@ fn fail<T>(code: i32, reason: String) -> Result<T, Failure> {
     Err(Failure { code, reason })
 }
 
-#[derive(Debug)]
-enum Json {
+/// A JSON document as read, before it is matched to any struct. The
+/// language server speaks JSON-RPC in these too, so `binz lsp` needs no
+/// second parser.
+#[derive(Debug, Clone)]
+pub enum Json {
     Null,
     Bool(bool),
     /// The number exactly as written, so an integer field can refuse `1.0`
@@ -54,6 +57,67 @@ enum Json {
 }
 
 impl Json {
+    /// The value under `key`, when this is an object that has one.
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Num(n) => n.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// The document as compact JSON text. A number goes back out exactly as
+    /// it came in, so a request id is echoed digit for digit.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        self.write_to(&mut out);
+        out
+    }
+
+    fn write_to(&self, out: &mut String) {
+        match self {
+            Json::Null => out.push_str("null"),
+            Json::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Json::Num(n) => out.push_str(n),
+            Json::Str(s) => write_str(s, out),
+            Json::Arr(items) => {
+                out.push('[');
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    v.write_to(out);
+                }
+                out.push(']');
+            }
+            Json::Obj(entries) => {
+                out.push('{');
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_str(k, out);
+                    out.push(':');
+                    v.write_to(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             Json::Null => "null",
@@ -67,6 +131,11 @@ impl Json {
 }
 
 // --------------------------------------------------------------- reading
+
+/// `text` as a JSON document, matched to nothing.
+pub fn document(text: &str) -> Result<Json, Failure> {
+    Reader { src: text.as_bytes(), pos: 0 }.document()
+}
 
 /// `json.parse`: the slots of one `@json` struct, read from `text`.
 pub fn parse(schemas: &[Schema], schema: u32, text: &str) -> Result<Vec<Value>, Failure> {

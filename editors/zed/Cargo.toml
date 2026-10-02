@@ -1,0 +1,14 @@
+[package]
+name = "zed_binz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Zed compiles this crate to WebAssembly. Its only job is to tell Zed how to
+# start `binz lsp`; the language server itself is the `binz` binary.
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

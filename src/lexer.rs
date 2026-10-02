@@ -207,180 +207,212 @@ impl Lexer {
     pub fn tokenize(mut self) -> CResult<Vec<Token>> {
         let mut out = Vec::new();
         loop {
-            self.skip_trivia()?;
-            let span = self.span();
-            let c = self.peek();
-            if c == '\0' {
-                out.push(Token { kind: Tok::Eof, span });
+            let t = self.token()?;
+            let eof = t.kind == Tok::Eof;
+            out.push(t);
+            if eof {
                 return Ok(out);
             }
+        }
+    }
 
-            let kind = if c.is_ascii_alphabetic() || c == '_' {
-                let mut s = String::new();
-                while self.peek().is_ascii_alphanumeric() || self.peek() == '_' {
-                    s.push(self.bump());
+    /// Every token that can be read, for the language server: a buffer being
+    /// typed into is rarely a program, and an unterminated string on one line
+    /// should not hide the functions declared below it. The rest of a line
+    /// that fails to lex is dropped and lexing resumes on the next one.
+    pub fn tokenize_lossy(mut self) -> Vec<Token> {
+        let mut out = Vec::new();
+        loop {
+            match self.token() {
+                Ok(t) => {
+                    let eof = t.kind == Tok::Eof;
+                    out.push(t);
+                    if eof {
+                        return out;
+                    }
                 }
-                match s.as_str() {
-                    "function" => Tok::Function,
-                    "import" => Tok::Import,
-                    "as" => Tok::As,
-                    "stub" => Tok::Stub,
-                    "fn" => Tok::Fn,
-                    "struct" => Tok::Struct,
-                    "const" => Tok::Const,
-                    "var" => Tok::Var,
-                    "return" => Tok::Return,
-                    "if" => Tok::If,
-                    "else" => Tok::Else,
-                    "while" => Tok::While,
-                    "cast" => Tok::Cast,
-                    "true" => Tok::True,
-                    "false" => Tok::False,
-                    _ => match (Kind::from_name(&s), MapKind::from_name(&s)) {
-                        (Some(k), _) => Tok::Container(k),
-                        (_, Some(mk)) => Tok::Map(mk),
-                        _ => Tok::Ident(s),
-                    },
+                Err(_) => {
+                    while self.peek() != '\n' && self.peek() != '\0' {
+                        self.bump();
+                    }
                 }
-            } else if c.is_ascii_digit() {
-                let mut s = String::new();
+            }
+        }
+    }
+
+    fn token(&mut self) -> CResult<Token> {
+        self.skip_trivia()?;
+        let span = self.span();
+        let c = self.peek();
+        if c == '\0' {
+            return Ok(Token { kind: Tok::Eof, span });
+        }
+
+        let kind = if c.is_ascii_alphabetic() || c == '_' {
+            let mut s = String::new();
+            while self.peek().is_ascii_alphanumeric() || self.peek() == '_' {
+                s.push(self.bump());
+            }
+            match s.as_str() {
+                "function" => Tok::Function,
+                "import" => Tok::Import,
+                "as" => Tok::As,
+                "stub" => Tok::Stub,
+                "fn" => Tok::Fn,
+                "struct" => Tok::Struct,
+                "const" => Tok::Const,
+                "var" => Tok::Var,
+                "return" => Tok::Return,
+                "if" => Tok::If,
+                "else" => Tok::Else,
+                "while" => Tok::While,
+                "cast" => Tok::Cast,
+                "true" => Tok::True,
+                "false" => Tok::False,
+                _ => match (Kind::from_name(&s), MapKind::from_name(&s)) {
+                    (Some(k), _) => Tok::Container(k),
+                    (_, Some(mk)) => Tok::Map(mk),
+                    _ => Tok::Ident(s),
+                },
+            }
+        } else if c.is_ascii_digit() {
+            let mut s = String::new();
+            while self.peek().is_ascii_digit() {
+                s.push(self.bump());
+            }
+            if self.peek() == '.' && self.peek2().is_ascii_digit() {
+                s.push(self.bump());
                 while self.peek().is_ascii_digit() {
                     s.push(self.bump());
                 }
-                if self.peek() == '.' && self.peek2().is_ascii_digit() {
-                    s.push(self.bump());
-                    while self.peek().is_ascii_digit() {
-                        s.push(self.bump());
-                    }
-                    let v: f64 = s
-                        .parse()
-                        .map_err(|_| CompileError::new("invalid float literal", span))?;
-                    Tok::Float(v)
-                } else {
-                    let v: i64 = s
-                        .parse()
-                        .map_err(|_| CompileError::new("integer literal out of range", span))?;
-                    Tok::Int(v)
-                }
-            } else if c == '"' {
-                self.bump();
-                let mut s = String::new();
-                loop {
-                    let ch = self.peek();
-                    if ch == '\0' || ch == '\n' {
-                        return Err(CompileError::new("unterminated string literal", span));
-                    }
-                    self.bump();
-                    if ch == '"' {
-                        break;
-                    }
-                    if ch == '\\' {
-                        let esc = self.bump();
-                        s.push(match esc {
-                            'n' => '\n',
-                            't' => '\t',
-                            'r' => '\r',
-                            '0' => '\0',
-                            '\\' => '\\',
-                            '"' => '"',
-                            other => {
-                                return Err(CompileError::new(
-                                    format!("unknown escape sequence `\\{}`", other),
-                                    span,
-                                ))
-                            }
-                        });
-                    } else {
-                        s.push(ch);
-                    }
-                }
-                Tok::Str(s)
+                let v: f64 = s
+                    .parse()
+                    .map_err(|_| CompileError::new("invalid float literal", span))?;
+                Tok::Float(v)
             } else {
+                let v: i64 = s
+                    .parse()
+                    .map_err(|_| CompileError::new("integer literal out of range", span))?;
+                Tok::Int(v)
+            }
+        } else if c == '"' {
+            self.bump();
+            let mut s = String::new();
+            loop {
+                let ch = self.peek();
+                if ch == '\0' || ch == '\n' {
+                    return Err(CompileError::new("unterminated string literal", span));
+                }
                 self.bump();
-                match c {
-                    '(' => Tok::LParen,
-                    ')' => Tok::RParen,
-                    '{' => Tok::LBrace,
-                    '}' => Tok::RBrace,
-                    '[' => Tok::LBracket,
-                    ']' => Tok::RBracket,
-                    ',' => Tok::Comma,
-                    ';' => Tok::Semi,
-                    ':' => Tok::Colon,
-                    '.' => Tok::Dot,
-                    '+' => Tok::Plus,
-                    '*' => Tok::Star,
-                    '/' => Tok::Slash,
-                    '%' => Tok::Percent,
-                    '@' => Tok::At,
-                    '-' => {
-                        if self.peek() == '>' {
-                            self.bump();
-                            Tok::Arrow
-                        } else {
-                            Tok::Minus
-                        }
-                    }
-                    '=' => {
-                        if self.peek() == '=' {
-                            self.bump();
-                            Tok::EqEq
-                        } else {
-                            Tok::Assign
-                        }
-                    }
-                    '!' => {
-                        if self.peek() == '=' {
-                            self.bump();
-                            Tok::Ne
-                        } else {
-                            Tok::Bang
-                        }
-                    }
-                    '<' => {
-                        if self.peek() == '=' {
-                            self.bump();
-                            Tok::Le
-                        } else {
-                            Tok::Lt
-                        }
-                    }
-                    '>' => {
-                        if self.peek() == '=' {
-                            self.bump();
-                            Tok::Ge
-                        } else {
-                            Tok::Gt
-                        }
-                    }
-                    '&' => {
-                        if self.peek() == '&' {
-                            self.bump();
-                            Tok::AndAnd
-                        } else {
-                            Tok::Amp
-                        }
-                    }
-                    '|' => {
-                        if self.peek() == '|' {
-                            self.bump();
-                            Tok::OrOr
-                        } else {
+                if ch == '"' {
+                    break;
+                }
+                if ch == '\\' {
+                    let esc = self.bump();
+                    s.push(match esc {
+                        'n' => '\n',
+                        't' => '\t',
+                        'r' => '\r',
+                        '0' => '\0',
+                        '\\' => '\\',
+                        '"' => '"',
+                        other => {
                             return Err(CompileError::new(
-                                "unexpected `|` (binZ has no bitwise operators; use `||`)",
+                                format!("unknown escape sequence `\\{}`", other),
                                 span,
-                            ));
+                            ))
                         }
-                    }
-                    other => {
-                        return Err(CompileError::new(
-                            format!("unexpected character `{}`", other),
-                            span,
-                        ))
+                    });
+                } else {
+                    s.push(ch);
+                }
+            }
+            Tok::Str(s)
+        } else {
+            self.bump();
+            match c {
+                '(' => Tok::LParen,
+                ')' => Tok::RParen,
+                '{' => Tok::LBrace,
+                '}' => Tok::RBrace,
+                '[' => Tok::LBracket,
+                ']' => Tok::RBracket,
+                ',' => Tok::Comma,
+                ';' => Tok::Semi,
+                ':' => Tok::Colon,
+                '.' => Tok::Dot,
+                '+' => Tok::Plus,
+                '*' => Tok::Star,
+                '/' => Tok::Slash,
+                '%' => Tok::Percent,
+                '@' => Tok::At,
+                '-' => {
+                    if self.peek() == '>' {
+                        self.bump();
+                        Tok::Arrow
+                    } else {
+                        Tok::Minus
                     }
                 }
-            };
-            out.push(Token { kind, span });
-        }
+                '=' => {
+                    if self.peek() == '=' {
+                        self.bump();
+                        Tok::EqEq
+                    } else {
+                        Tok::Assign
+                    }
+                }
+                '!' => {
+                    if self.peek() == '=' {
+                        self.bump();
+                        Tok::Ne
+                    } else {
+                        Tok::Bang
+                    }
+                }
+                '<' => {
+                    if self.peek() == '=' {
+                        self.bump();
+                        Tok::Le
+                    } else {
+                        Tok::Lt
+                    }
+                }
+                '>' => {
+                    if self.peek() == '=' {
+                        self.bump();
+                        Tok::Ge
+                    } else {
+                        Tok::Gt
+                    }
+                }
+                '&' => {
+                    if self.peek() == '&' {
+                        self.bump();
+                        Tok::AndAnd
+                    } else {
+                        Tok::Amp
+                    }
+                }
+                '|' => {
+                    if self.peek() == '|' {
+                        self.bump();
+                        Tok::OrOr
+                    } else {
+                        return Err(CompileError::new(
+                            "unexpected `|` (binZ has no bitwise operators; use `||`)",
+                            span,
+                        ));
+                    }
+                }
+                other => {
+                    return Err(CompileError::new(
+                        format!("unexpected character `{}`", other),
+                        span,
+                    ))
+                }
+            }
+        };
+        Ok(Token { kind, span })
     }
 }
