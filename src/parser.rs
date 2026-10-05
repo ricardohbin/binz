@@ -401,6 +401,18 @@ impl Parser {
         Ok((k, v))
     }
 
+    /// `<A, B, ...>` after `Tuple`. Arity is checked by the compiler, so the
+    /// message can name the type that was meant.
+    fn parse_tuple_args(&mut self) -> CResult<Vec<TypeExpr>> {
+        self.expect(Tok::Lt)?;
+        let mut elems = vec![self.parse_type()?];
+        while self.eat(&Tok::Comma) {
+            elems.push(self.parse_type()?);
+        }
+        self.expect(Tok::Gt)?;
+        Ok(elems)
+    }
+
     fn parse_type(&mut self) -> CResult<TypeExpr> {
         let sp = self.span();
         match self.peek().clone() {
@@ -423,6 +435,10 @@ impl Parser {
                 self.bump();
                 let (k, v) = self.parse_map_args()?;
                 Ok(TypeExpr::Map(mk, Box::new(k), Box::new(v), sp))
+            }
+            Tok::Tuple => {
+                self.bump();
+                Ok(TypeExpr::Tuple(self.parse_tuple_args()?, sp))
             }
             Tok::Star => {
                 self.bump();
@@ -664,6 +680,12 @@ impl Parser {
             Tok::LParen => {
                 self.bump();
                 let e = self.parse_expr()?;
+                if self.peek() == &Tok::Comma {
+                    return Err(CompileError::new(
+                        "binZ has no tuple shorthand; write the type out: `Tuple<A, B>(a, b)`",
+                        self.span(),
+                    ));
+                }
                 self.expect(Tok::RParen)?;
                 Ok(e)
             }
@@ -723,6 +745,26 @@ impl Parser {
                 }
                 self.expect(Tok::RBrace)?;
                 Ok(Expr::MapLit { kind, key, val, entries, span })
+            }
+            Tok::Tuple => {
+                self.bump();
+                let elems = self.parse_tuple_args()?;
+                if self.peek() == &Tok::LBrace {
+                    return Err(CompileError::new(
+                        "a tuple is built with parentheses and every element: `Tuple<A, B>(a, b)`",
+                        self.span(),
+                    ));
+                }
+                self.expect(Tok::LParen)?;
+                let mut values = Vec::new();
+                while self.peek() != &Tok::RParen {
+                    values.push(self.parse_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen)?;
+                Ok(Expr::TupleLit { elems, values, span })
             }
             Tok::Cast => {
                 self.bump();

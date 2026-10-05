@@ -86,6 +86,10 @@ pub enum Type {
     /// keyed by value. Maps are their own variant rather than a `Kind`
     /// because they are the only types with two type arguments.
     Map(MapKind, Box<Type>, Box<Type>),
+    /// `Tuple<A, B, ...>`: two or more values side by side, laid out flat and
+    /// copied by value exactly like a struct whose fields have no names. If
+    /// one of them is an `Error`, it is the first.
+    Tuple(Vec<Type>),
 }
 
 impl Type {
@@ -100,7 +104,7 @@ impl Type {
     /// True for types that live in memory across several slots and are
     /// therefore represented by the address of their storage.
     pub fn is_aggregate(&self) -> bool {
-        matches!(self, Type::Struct(_) | Type::Array(..))
+        matches!(self, Type::Struct(_) | Type::Array(..) | Type::Tuple(_))
     }
 
     /// A value that fits in one slot, and so may be stored inside a heap
@@ -188,6 +192,10 @@ pub fn type_name(t: &Type, structs: &[StructInfo]) -> String {
         Type::Container(k, elem) => format!("{}<{}>", k.name(), type_name(elem, structs)),
         Type::Map(mk, k, v) => {
             format!("{}<{}, {}>", mk.name(), type_name(k, structs), type_name(v, structs))
+        }
+        Type::Tuple(elems) => {
+            let es: Vec<String> = elems.iter().map(|e| type_name(e, structs)).collect();
+            format!("Tuple<{}>", es.join(", "))
         }
     }
 }

@@ -90,7 +90,8 @@ impl Outline {
 }
 
 const PRIMITIVES: &[&str] = &["i32", "i64", "f64", "bool", "str", "void"];
-const GENERICS: &[&str] = &["Vector", "LinkedList", "Set", "SortedSet", "HashMap", "SortedMap"];
+const GENERICS: &[&str] =
+    &["Vector", "LinkedList", "Set", "SortedSet", "HashMap", "SortedMap", "Tuple"];
 const STATEMENT_KEYWORDS: &[&str] =
     &["const", "var", "if", "else", "while", "return", "cast", "true", "false", "stub"];
 const TOP_KEYWORDS: &[&str] = &["import", "struct", "function"];
@@ -295,7 +296,7 @@ fn scan(toks: &[Token], at: Span) -> (Vec<Local>, Vec<Open>) {
                 open.pop();
             }
             Tok::LBracket => open.push(Open::Bracket),
-            Tok::Lt if matches!(prev, Some(Tok::Cast | Tok::Container(_) | Tok::Map(_))) => {
+            Tok::Lt if matches!(prev, Some(Tok::Cast | Tok::Container(_) | Tok::Map(_) | Tok::Tuple)) => {
                 open.push(Open::Angle)
             }
             Tok::Gt if open.last() == Some(&Open::Angle) => {

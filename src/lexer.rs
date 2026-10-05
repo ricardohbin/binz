@@ -42,6 +42,9 @@ pub enum Tok {
     /// `HashMap` / `SortedMap`: reserved for the same reason, and separate
     /// from `Container` because maps are spelled with two type arguments.
     Map(MapKind),
+    /// `Tuple`: reserved like the containers, and its own token because it
+    /// takes any number of type arguments.
+    Tuple,
 
     // punctuation
     LParen,
@@ -106,6 +109,7 @@ pub fn describe(t: &Tok) -> String {
         Tok::False => "false".into(),
         Tok::Container(k) => k.name().into(),
         Tok::Map(mk) => mk.name().into(),
+        Tok::Tuple => "Tuple".into(),
         Tok::LParen => "(".into(),
         Tok::RParen => ")".into(),
         Tok::LBrace => "{".into(),
@@ -269,6 +273,7 @@ impl Lexer {
                 "cast" => Tok::Cast,
                 "true" => Tok::True,
                 "false" => Tok::False,
+                "Tuple" => Tok::Tuple,
                 _ => match (Kind::from_name(&s), MapKind::from_name(&s)) {
                     (Some(k), _) => Tok::Container(k),
                     (_, Some(mk)) => Tok::Map(mk),

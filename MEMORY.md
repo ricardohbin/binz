@@ -140,7 +140,7 @@ does not go in.
   struct` + `@field("key")` on a field; unmarked fields use their own name,
   unknown JSON keys are skipped, a missing one is an error. `json.parse(text,
   &p): Error` and `json.stringify(p, &text): Error` — the Error is the return
-  value because binZ has no tuples. **`Error { reason: str, stacktrace: str,
+  value because binZ had no tuples then (see Tuples below). **`Error { reason: str, stacktrace: str,
   code: i32 }` is struct id 0, declared by binZ, visible in every file and the
   only type that crosses a module boundary.** `code 0` = success; 1 syntax,
   2 type, 3 missing, 4 duplicate key, 5 NaN/inf. The check is
@@ -148,6 +148,13 @@ does not go in.
   `bool`"**, flagged. A failed call leaves the destination untouched. The
   schema of each `@json` struct lives in the artifact (VERSION 5). Rationale
   in `memory/2026-09-23.md`.
+- **Tuples, 2026-10-05 — his ask, his syntax.** `Tuple<A, B>(a, b)` is the
+  only literal (no `(a, b)`, no `Tuple{}`); `Type::Tuple` is a flat value
+  aggregate, so multiple returns ride the struct sret path — no VM/artifact
+  change. **An `Error` in a tuple is always element 0, at most one**, checked
+  in `check_tuple` wherever a tuple type is written. Access is **`t[0]` with a
+  literal index — my call**; no destructuring. Rationale and flags in
+  `memory/2026-10-05.md`.
 - **`T{}` default literal, 2026-09-23 — his ask.** Every field or none:
   `Point{}` gives `0`, `0.0`, **`false`** (he proposed `true`; I pushed back,
   he chose `false`), `""`, a fresh empty container/map per slot, recursively.
@@ -309,6 +316,10 @@ does not go in.
   `[0; 3]`. Taken 2026-09-23 on his ask, all-or-nothing so it stays one bend.
 - **No `HashMap<str, V>` <-> JSON object, no optional fields** in
   `binz/json`. Flagged 2026-09-23.
+- **`json.parse(text, &p): Error` vs `Tuple<Error, T>`** — the out-pointer
+  existed only because there were no tuples; now two error+value conventions
+  coexist. Migrating needs `json.parse<T>(text)`. Flagged 2026-10-05.
+- **`t[0]` vs `t.0`, and no tuple destructuring** — my calls. Flagged 2026-10-05.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
 - `.binzc` artifact extension was my extrapolation from his `.binz` request.
 

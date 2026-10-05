@@ -588,6 +588,7 @@ impl Compiler {
             Type::Map(..) => Err("a JSON object is read into an `@json` struct".to_string()),
             Type::Ptr(_) => Err("an address means nothing outside this process".to_string()),
             Type::Fn(..) => Err("a function is not data".to_string()),
+            Type::Tuple(_) => Err("a JSON value has no tuple; use an `@json` struct".to_string()),
             Type::Void => unreachable!("a field is never `void`"),
         }
     }
@@ -868,7 +869,84 @@ impl Compiler {
                 }
                 Type::Map(*mk, Box::new(kt), Box::new(vt))
             }
+            TypeExpr::Tuple(elems, sp) => {
+                let mut ts = Vec::new();
+                for e in elems {
+                    ts.push(self.resolve_type(e)?);
+                }
+                self.check_tuple(&ts, elems, *sp)?;
+                Type::Tuple(ts)
+            }
         })
+    }
+
+    /// The rules a `Tuple<...>` is held to wherever it is written, so a
+    /// tuple that breaks one never reaches a variable, a parameter or a
+    /// return type: two elements at least (one is the element itself, none
+    /// is `void`), and an `Error`, when there is one, comes first.
+    fn check_tuple(&self, ts: &[Type], elems: &[TypeExpr], sp: Span) -> CResult<()> {
+        if ts.len() < 2 {
+            return Err(CompileError::new(
+                format!(
+                    "a tuple holds two or more values; `Tuple<{}>` is just `{}`",
+                    self.tn(&ts[0]),
+                    self.tn(&ts[0])
+                ),
+                sp,
+            ));
+        }
+        for (i, t) in ts.iter().enumerate() {
+            if *t == Type::Void {
+                return Err(CompileError::new("a tuple cannot hold `void`", elems[i].span()));
+            }
+            if i > 0 && *t == Type::Struct(ERROR_ID) {
+                let mut moved = vec![self.tn(t)];
+                moved.extend(ts.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, t)| self.tn(t)));
+                let hint = if ts[0] == Type::Struct(ERROR_ID) {
+                    "a tuple carries one `Error`, and it is the first element".to_string()
+                } else {
+                    format!("the `Error` is always the first element: `Tuple<{}>`", moved.join(", "))
+                };
+                return Err(CompileError::new(
+                    format!("`Error` is element {} of this tuple; {}", i, hint),
+                    elems[i].span(),
+                ));
+            }
+        }
+        let ty = Type::Tuple(ts.to_vec());
+        if self.slots64(&ty) > MAX_SLOTS {
+            return Err(CompileError::new(
+                format!("`{}` needs more than {} slots", self.tn(&ty), MAX_SLOTS),
+                sp,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Where element `i` of a tuple starts, in slots from the first.
+    fn tuple_offset(&self, ts: &[Type], i: usize) -> u32 {
+        ts[..i].iter().map(|t| self.size_of(t)).sum()
+    }
+
+    /// The element a tuple index names. It is always written as a literal,
+    /// because which element it is decides the type of the expression.
+    fn tuple_index(&self, ts: &[Type], index: &Expr) -> CResult<usize> {
+        match index {
+            Expr::Int(i, _) if (*i as usize) < ts.len() => Ok(*i as usize),
+            Expr::Int(i, sp) => Err(CompileError::new(
+                format!(
+                    "`{}` has elements 0 to {}, so there is no element {}",
+                    self.tn(&Type::Tuple(ts.to_vec())),
+                    ts.len() - 1,
+                    i
+                ),
+                *sp,
+            )),
+            other => Err(CompileError::new(
+                "a tuple is indexed by a literal, such as `t[0]`, since each element has its own type",
+                other.span(),
+            )),
+        }
     }
 
     /// Slot footprint in `u64`, so that oversized array types are caught
@@ -877,6 +955,7 @@ impl Compiler {
         match t {
             Type::Struct(id) => self.structs[*id].size as u64,
             Type::Array(elem, n) => self.slots64(elem).saturating_mul(*n as u64),
+            Type::Tuple(ts) => ts.iter().map(|t| self.slots64(t)).fold(0u64, u64::saturating_add),
             _ => 1,
         }
     }
@@ -927,6 +1006,13 @@ impl Compiler {
                     }
                 }
             }
+            Type::Tuple(ts) => {
+                let mut total = 0u32;
+                for t in ts {
+                    total += self.field_size(t, span, visiting)?;
+                }
+                total
+            }
             _ => 1,
         })
     }
@@ -935,6 +1021,7 @@ impl Compiler {
         match t {
             Type::Struct(id) => self.structs[*id].size,
             Type::Array(elem, n) => self.size_of(elem) * n,
+            Type::Tuple(ts) => ts.iter().map(|t| self.size_of(t)).sum(),
             _ => 1,
         }
     }
@@ -1401,6 +1488,12 @@ impl Compiler {
                         self.emit_u32(n);
                         Ok((*elem, mutable))
                     }
+                    Type::Tuple(ts) => {
+                        let i = self.tuple_index(&ts, index)?;
+                        let off = self.tuple_offset(&ts, i);
+                        self.emit_op_u32(OP_FIELD, off);
+                        Ok((ts[i].clone(), mutable))
+                    }
                     Type::Container(kind, _) => Err(CompileError::new(
                         format!(
                             "an element of `{}<...>` lives on the heap and has no address; copy it into a variable first",
@@ -1635,6 +1728,15 @@ impl Compiler {
                         self.emit(OP_GET);
                         Ok(*elem)
                     }
+                    Type::Tuple(ts) => {
+                        let i = self.tuple_index(&ts, index)?;
+                        let off = self.tuple_offset(&ts, i);
+                        self.emit_op_u32(OP_FIELD, off);
+                        if !ts[i].is_aggregate() {
+                            self.emit(OP_LOAD_PTR);
+                        }
+                        Ok(ts[i].clone())
+                    }
                     Type::Map(_, kt, vt) => {
                         self.compile_key(index, &kt)?;
                         self.emit(OP_GET);
@@ -1662,6 +1764,8 @@ impl Compiler {
             }
 
             Expr::StructLit { name, fields, span } => self.compile_struct_lit(name, fields, *span),
+
+            Expr::TupleLit { elems, values, span } => self.compile_tuple_lit(elems, values, *span),
 
             Expr::Call { callee, args, span } => self.compile_call(callee, args, *span),
         }
@@ -1809,6 +1913,39 @@ impl Compiler {
         Ok(Type::Struct(id))
     }
 
+    /// `Tuple<A, B>(a, b)`: the same flat storage a struct literal fills,
+    /// with the elements typed by the written type rather than by a
+    /// declaration.
+    fn compile_tuple_lit(&mut self, elems: &[TypeExpr], values: &[Expr], span: Span) -> CResult<Type> {
+        let ty = self.resolve_type(&TypeExpr::Tuple(elems.to_vec(), span))?;
+        let ts = match &ty {
+            Type::Tuple(ts) => ts.clone(),
+            _ => unreachable!(),
+        };
+        if values.len() != ts.len() {
+            return Err(CompileError::new(
+                format!(
+                    "`{}` holds {} values but {} were given; binZ requires every element",
+                    self.tn(&ty),
+                    ts.len(),
+                    values.len()
+                ),
+                span,
+            ));
+        }
+        let slot = self.reserve(self.size_of(&ty));
+        for (i, (t, value)) in ts.iter().zip(values).enumerate() {
+            self.emit_op_u32(OP_ADDR_LOCAL, slot);
+            let off = self.tuple_offset(&ts, i);
+            self.emit_op_u32(OP_FIELD, off);
+            let got = self.compile_expr(value, Some(t))?;
+            self.expect_type(t, &got, value.span(), "in tuple literal")?;
+            self.store_elem(t);
+        }
+        self.emit_op_u32(OP_ADDR_LOCAL, slot);
+        Ok(ty)
+    }
+
     /// `Point{}`: every field at its default -- `0`, `0.0`, `false`, `""`,
     /// an empty container, and the same again for a nested struct or each
     /// element of an array. It is all or nothing: a literal names every
@@ -1855,6 +1992,12 @@ impl Compiler {
                 Ok(())
             }
             Type::Array(elem, _) => self.defaultable(elem, format!("{}[i]", path)),
+            Type::Tuple(ts) => {
+                for (i, t) in ts.iter().enumerate() {
+                    self.defaultable(t, format!("{}[{}]", path, i))?;
+                }
+                Ok(())
+            }
             Type::Ptr(_) | Type::Fn(..) => Err((path, t.clone())),
             _ => Ok(()),
         }
@@ -1867,6 +2010,12 @@ impl Compiler {
             Type::Struct(id) => {
                 for f in self.structs[*id].fields.clone() {
                     self.emit_default(&f.ty, at, off + f.offset);
+                }
+            }
+            Type::Tuple(ts) => {
+                for (i, t) in ts.clone().iter().enumerate() {
+                    let o = self.tuple_offset(ts, i);
+                    self.emit_default(t, at, off + o);
                 }
             }
             // A runtime loop, so a long array costs the code of one element
@@ -2947,6 +3096,7 @@ fn struct_in(t: &Type) -> Option<usize> {
         Type::Ptr(inner) | Type::Array(inner, _) | Type::Container(_, inner) => struct_in(inner),
         Type::Map(_, k, v) => struct_in(k).or_else(|| struct_in(v)),
         Type::Fn(ps, r) => ps.iter().find_map(struct_in).or_else(|| struct_in(r)),
+        Type::Tuple(ts) => ts.iter().find_map(struct_in),
         _ => None,
     }
 }

@@ -45,6 +45,7 @@ Every design decision below falls out of that rule.
 | `test.equal` is the one assertion | `equal` states what was expected; `test.fail` covers what equality cannot say |
 | A stub replaces a module's function, written at the top of the test | mocking without interfaces or an argument threaded through three layers |
 | A call that can fail answers an `Error`, and `code == 0` means it did not | one error convention, and no truthiness: `if (err.code != 0)` |
+| A tuple is `Tuple<A, B>(a, b)`, and an `Error` in it is always element `0` | no `(a, b)` shorthand, and the error is in the same place in every signature |
 | Only an `@json` struct crosses the wire, and a field is its own key unless `@field` says otherwise | `@field("year")` on `year` is refused — it would be a second spelling of the default |
 
 ## Install & use
@@ -74,8 +75,8 @@ Primitives: `i32`, `i64`, `f64`, `bool`, `str`, and `void` (return type only).
 
 Composites: `*T` (pointer), `function(A, B): R` (function), `struct`s,
 `[T; N]` (fixed array), the heap containers `Vector<T>`, `LinkedList<T>`,
-`Set<T>` and `SortedSet<T>`, and the maps `HashMap<K, V>` and
-`SortedMap<K, V>`.
+`Set<T>` and `SortedSet<T>`, the maps `HashMap<K, V>` and
+`SortedMap<K, V>`, and tuples, `Tuple<A, B, ...>`.
 
 ### Variables
 
@@ -194,6 +195,43 @@ shift(&a, 10);
 var pn: *i64 = &a.y;     // pointers to fields work
 *pn = 99;
 ```
+
+### Tuples
+
+A tuple is two or more values side by side: a value type, laid out flat and
+copied like a struct whose fields have no names. It is how a function answers
+more than one thing. The type is written out at the literal too — there is no
+`(a, b)` shorthand and no `Tuple{}`:
+
+```c
+function divmod(a: i32, b: i32): Tuple<Error, i32, i32> {
+    if (b == 0) {
+        return Tuple<Error, i32, i32>(Error{ reason: "division by zero", stacktrace: "", code: 1 }, 0, 0);
+    }
+    return Tuple<Error, i32, i32>(Error{}, a / b, a % b);
+}
+
+const r: Tuple<Error, i32, i32> = divmod(7, 2);
+if (r[0].code != 0) {
+    io.print(r[0].reason);
+}
+io.print(cast<str>(r[1]));   // 3
+```
+
+`t[0]` reaches an element, with the same `[]` as every container — but the
+index is always a literal, because each element has its own type. On a `var`
+tuple, `t[1] = x` assigns one. A tuple holds at least two values (`Tuple<i32>`
+is just `i32`), never `void`, and nests: `n[1][0]`.
+
+**An `Error` in a tuple is always element `0`**, and a tuple carries at most
+one. The compiler checks it wherever a tuple type is written — a return type,
+a parameter, a variable, a field — so `Tuple<i32, Error>` is refused with the
+order that works, `Tuple<Error, i32>`. A caller therefore always finds the
+error in `r[0]`.
+
+Like a struct, a tuple cannot go into a heap container, has no `==`, and is
+not something `cast<str>` formats. A struct holding a tuple field defaults
+element by element under `T{}`.
 
 ### Containers
 
