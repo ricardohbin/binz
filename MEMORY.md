@@ -243,7 +243,9 @@ does not go in.
   generated `src/` is committed on purpose) and `editors/zed/` (extension,
   grammar via `path` in the same repo). **A new keyword or construct in the
   lexer/parser needs a matching rule in `grammar.js`** and usually a line in
-  `highlights.scm`, then `tree-sitter generate` and a `rev` bump. Detail in
+  `highlights.scm`, then `tree-sitter generate` and a `rev` bump. **The `rev` is a commit on the
+  feature branch** (he squash-merges), so it only resolves while that branch
+  is on the remote. Detail in
   `memory/2026-09-25.md`.
 - **Language server, 2026-09-29**: `binz lsp` (stdio, no deps, reuses
   `json.rs`) — completion from lossy tokens in `src/complete.rs`, diagnostics
