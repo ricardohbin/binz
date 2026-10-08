@@ -103,6 +103,7 @@ module.exports = grammar({
         $.array_type,
         $.container_type,
         $.map_type,
+        $.tuple_type,
         $.pointer_type,
         $.function_type,
       ),
@@ -128,6 +129,12 @@ module.exports = grammar({
         field('value', $._type),
         '>',
       ),
+
+    // `Tuple<Error, i32>`
+    tuple_type: ($) =>
+      seq(field('kind', $.tuple_keyword), '<', $._type, repeat1(seq(',', $._type)), '>'),
+
+    tuple_keyword: (_) => 'Tuple',
 
     pointer_type: ($) => prec.right(seq('*', field('pointee', $._type))),
 
@@ -215,6 +222,7 @@ module.exports = grammar({
         $.array_repeat,
         $.container_literal,
         $.map_literal,
+        $.tuple_literal,
         $.struct_literal,
         $.cast_expression,
         $.unary_expression,
@@ -301,6 +309,10 @@ module.exports = grammar({
         commaSep($.map_entry),
         '}',
       ),
+
+    // `Tuple<Error, i32>(err, 42)`
+    tuple_literal: ($) =>
+      seq(field('type', $.tuple_type), '(', commaSep($._expression), ')'),
 
     map_entry: ($) => seq(field('key', $._expression), ':', field('value', $._expression)),
 

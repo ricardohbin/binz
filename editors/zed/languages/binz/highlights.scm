@@ -13,6 +13,7 @@
 (primitive_type) @type.builtin
 (container_keyword) @type.builtin
 (map_keyword) @type.builtin
+(tuple_keyword) @type.builtin
 
 (struct_literal name: (type_identifier) @constructor)
 
@@ -120,6 +121,7 @@
 ; Generic angle brackets are brackets, not comparisons.
 (container_type ["<" ">"] @punctuation.bracket)
 (map_type ["<" ">"] @punctuation.bracket)
+(tuple_type ["<" ">"] @punctuation.bracket)
 (container_literal ["<" ">"] @punctuation.bracket)
 (map_literal ["<" ">"] @punctuation.bracket)
 (cast_expression ["<" ">"] @punctuation.bracket)

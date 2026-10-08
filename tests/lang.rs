@@ -2574,3 +2574,119 @@ fn a_pointer_or_a_function_has_no_default() {
     );
     assert!(e.contains("`f` is a `function(): void`, which has none"), "{}", e);
 }
+
+// ----------------------------------------------------------------- tuples
+
+#[test]
+fn a_tuple_returns_an_error_and_a_value() {
+    let out = run_ok(
+        "tuple_return",
+        "function divide(a: i32, b: i32): Tuple<Error, i32> {\n\
+           if (b == 0) { return Tuple<Error, i32>(Error{ reason: \"by zero\", stacktrace: \"\", code: 1 }, 0); }\n\
+           return Tuple<Error, i32>(Error{}, a / b);\n}\n\
+         function main(): i32 {\n\
+           const ok: Tuple<Error, i32> = divide(10, 2);\n\
+           io.print(cast<str>(ok[0].code) + \" \" + cast<str>(ok[1]));\n\
+           const bad: Tuple<Error, i32> = divide(1, 0);\n\
+           if (bad[0].code != 0) { io.print(bad[0].reason); }\n\
+           const f: function(i32, i32): Tuple<Error, i32> = divide;\n\
+           io.print(cast<str>(f(9, 3)[1]));\n\
+           return 0;\n}\n",
+    );
+    assert_eq!(out, "0 5\nby zero\n3\n");
+}
+
+#[test]
+fn a_tuple_is_a_value() {
+    let out = run_ok(
+        "tuple_value",
+        "struct P { x: i32, y: i32 }\n\
+         struct Holder { t: Tuple<P, str>, n: i32 }\n\
+         function bump(t: Tuple<i32, str>): Tuple<i32, str> { var c: Tuple<i32, str> = t; c[0] = c[0] + 1; return c; }\n\
+         function main(): i32 {\n\
+           var a: Tuple<i32, str> = Tuple<i32, str>(1, \"one\");\n\
+           var b: Tuple<i32, str> = a;\n\
+           b[1] = \"two\";\n\
+           const c: Tuple<i32, str> = bump(a);\n\
+           io.print(cast<str>(a[0]) + a[1] + \" \" + cast<str>(b[0]) + b[1] + \" \" + cast<str>(c[0]) + c[1]);\n\
+           var h: Holder = Holder{ t: Tuple<P, str>(P{ x: 3, y: 4 }, \"p\"), n: 9 };\n\
+           h.t[0].y = 40;\n\
+           io.print(cast<str>(h.t[0].x + h.t[0].y) + h.t[1] + cast<str>(h.n));\n\
+           const d: Holder = Holder{};\n\
+           io.print(cast<str>(d.t[0].x) + \"[\" + d.t[1] + \"]\");\n\
+           const n: Tuple<i32, Tuple<str, bool>, [i32; 2]> = Tuple<i32, Tuple<str, bool>, [i32; 2]>(7, Tuple<str, bool>(\"deep\", true), [5, 6]);\n\
+           io.print(n[1][0] + cast<str>(n[1][1]) + cast<str>(n[2][1]));\n\
+           return 0;\n}\n",
+    );
+    // Copies are independent: `b` and `bump`'s copy never touch `a`.
+    assert_eq!(out, "1one 1two 2one\n43p9\n0[]\ndeeptrue6\n");
+}
+
+#[test]
+fn an_error_is_the_first_element_of_a_tuple() {
+    let e = run_err(
+        "tuple_error_last",
+        "function f(): Tuple<i32, str, Error> { return Tuple<i32, str, Error>(1, \"\", Error{}); }\nfunction main(): i32 { return 0; }",
+    );
+    assert!(e.contains("`Error` is element 2 of this tuple; the `Error` is always the first element: `Tuple<Error, i32, str>`"), "{}", e);
+    let e = run_err(
+        "tuple_error_twice",
+        "function main(): i32 { const t: Tuple<Error, Error> = Tuple<Error, Error>(Error{}, Error{}); return 0; }",
+    );
+    assert!(e.contains("a tuple carries one `Error`, and it is the first element"), "{}", e);
+    // Everywhere a type is written, not only in a return type.
+    let e = run_err("tuple_error_field", "struct S { t: Tuple<i32, Error> }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("`Error` is element 1"), "{}", e);
+    let e = run_err("tuple_error_param", "function f(t: Tuple<i32, Error>): void { }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("`Error` is element 1"), "{}", e);
+}
+
+#[test]
+fn a_tuple_has_one_spelling() {
+    let cases = [
+        ("const t: i32 = (1, 2);", "binZ has no tuple shorthand; write the type out: `Tuple<A, B>(a, b)`"),
+        ("const t: Tuple<i32, i32> = Tuple<i32, i32>{};", "a tuple is built with parentheses and every element"),
+        ("const t: Tuple<i32, i32> = Tuple<i32, i32>(1);", "holds 2 values but 1 were given"),
+        ("const t: Tuple<i32> = 1;", "`Tuple<i32>` is just `i32`"),
+        ("const t: Tuple<i32, void> = 1;", "a tuple cannot hold `void`"),
+        ("const t: Tuple<i32, str> = Tuple<i32, i32>(1, 2);", "expected `Tuple<i32, str>`, found `Tuple<i32, i32>`"),
+        ("const t: Vector<Tuple<i32, i32>> = Vector<Tuple<i32, i32>>{};", "cannot hold `Tuple<i32, i32>`"),
+    ];
+    for (i, (body, want)) in cases.iter().enumerate() {
+        let e = run_err(&format!("tuple_spelling_{}", i), &format!("function main(): i32 {{ {} return 0; }}", body));
+        assert!(e.contains(want), "{}\n{}", body, e);
+    }
+}
+
+#[test]
+fn a_tuple_is_indexed_by_a_literal() {
+    let pre = "const t: Tuple<i32, str> = Tuple<i32, str>(1, \"a\");";
+    let e = run_err("tuple_idx_var", &format!("function main(): i32 {{ {} const i: i32 = 0; const x: i32 = t[i]; return 0; }}", pre));
+    assert!(e.contains("a tuple is indexed by a literal"), "{}", e);
+    let e = run_err("tuple_idx_range", &format!("function main(): i32 {{ {} const x: i32 = t[2]; return 0; }}", pre));
+    assert!(e.contains("has elements 0 to 1, so there is no element 2"), "{}", e);
+    let e = run_err("tuple_idx_const", &format!("function main(): i32 {{ {} t[0] = 2; return 0; }}", pre));
+    assert!(e.contains("declare it with `var`"), "{}", e);
+    let e = run_err("tuple_idx_type", &format!("function main(): i32 {{ {} const x: i32 = t[1]; return 0; }}", pre));
+    assert!(e.contains("expected `i32`, found `str`"), "{}", e);
+}
+
+#[test]
+fn a_tuple_crosses_a_module_boundary_when_its_elements_do() {
+    let out = run_project_ok(
+        "tuple_module",
+        &[
+            ("main.binz", "import binz/io;\nimport @root/math.binz;\nfunction main(): i32 {\n  const r: Tuple<Error, i32, i32> = math.divmod(7, 2);\n  io.print(cast<str>(r[1]) + \" \" + cast<str>(r[2]));\n  return 0;\n}\n"),
+            ("math.binz", "function divmod(a: i32, b: i32): Tuple<Error, i32, i32> {\n  return Tuple<Error, i32, i32>(Error{}, a / b, a % b);\n}\n"),
+        ],
+    );
+    assert_eq!(out, "3 1\n");
+    let e = run_project_err(
+        "tuple_module_struct",
+        &[
+            ("main.binz", "import @root/geo.binz;\nfunction main(): i32 { geo.origin(); return 0; }\n"),
+            ("geo.binz", "struct P { x: i32 }\nfunction origin(): Tuple<Error, P> { return Tuple<Error, P>(Error{}, P{ x: 0 }); }\n"),
+        ],
+    );
+    assert!(e.contains("`geo.origin` is typed with the struct `P`, which `@root/geo.binz` does not export"), "{}", e);
+}

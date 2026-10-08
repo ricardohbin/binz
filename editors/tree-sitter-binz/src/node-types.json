@@ -68,6 +68,10 @@
         "named": true
       },
       {
+        "type": "tuple_literal",
+        "named": true
+      },
+      {
         "type": "unary_expression",
         "named": true
       }
@@ -137,6 +141,10 @@
       },
       {
         "type": "primitive_type",
+        "named": true
+      },
+      {
+        "type": "tuple_type",
         "named": true
       },
       {
@@ -1203,6 +1211,58 @@
     }
   },
   {
+    "type": "tuple_literal",
+    "named": true,
+    "fields": {
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "tuple_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "tuple_type",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "tuple_keyword",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "unary_expression",
     "named": true,
     "fields": {
@@ -1535,6 +1595,10 @@
   {
     "type": "true",
     "named": false
+  },
+  {
+    "type": "tuple_keyword",
+    "named": true
   },
   {
     "type": "type_identifier",

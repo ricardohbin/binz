@@ -1,0 +1,56 @@
+// Tuples: more than one value out of a function, with the `Error` first.
+
+import binz/io;
+import binz/container;
+import binz/int;
+import binz/string;
+import binz/test;
+
+struct Range { lo: i32, hi: i32 }
+
+// Reads "lo..hi". A failed parse answers a real `Error` and a zero range,
+// so the caller checks `r[0]` before it reads `r[1]`.
+function parseRange(text: str): Tuple<Error, Range> {
+    const parts: Vector<str> = string.split(text, "..");
+    if (container.size(parts) != 2) {
+        return Tuple<Error, Range>(Error{ reason: "expected `lo..hi`", stacktrace: "", code: 1 }, Range{});
+    }
+    if (!int.canParse(parts[0]) || !int.canParse(parts[1])) {
+        return Tuple<Error, Range>(Error{ reason: "expected two integers", stacktrace: "", code: 2 }, Range{});
+    }
+    const r: Range = Range{ lo: cast<i32>(int.parse(parts[0])), hi: cast<i32>(int.parse(parts[1])) };
+    return Tuple<Error, Range>(Error{}, r);
+}
+
+// No error to report, so no `Error` in the tuple.
+function divmod(a: i32, b: i32): Tuple<i32, i32> {
+    return Tuple<i32, i32>(a / b, a % b);
+}
+
+function main(): i32 {
+    const r: Tuple<Error, Range> = parseRange("3..17");
+    if (r[0].code != 0) {
+        io.print(r[0].reason);
+        return 1;
+    }
+    io.print("range " + cast<str>(r[1].lo) + " to " + cast<str>(r[1].hi));
+
+    const bad: Tuple<Error, Range> = parseRange("3-17");
+    io.print("error " + cast<str>(bad[0].code) + ": " + bad[0].reason);
+
+    const q: Tuple<i32, i32> = divmod(17, 5);
+    io.print("17 = 5 * " + cast<str>(q[0]) + " + " + cast<str>(q[1]));
+    return 0;
+}
+
+@test function rejectsTextWithoutDots(): void {
+    const r: Tuple<Error, Range> = parseRange("nope");
+    test.equal(r[0].code, 1);
+}
+
+@test function readsBothEnds(): void {
+    const r: Tuple<Error, Range> = parseRange("-2..9");
+    test.equal(r[0].code, 0);
+    test.equal(r[1].lo, -2);
+    test.equal(r[1].hi, 9);
+}

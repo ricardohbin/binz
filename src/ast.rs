@@ -12,6 +12,8 @@ pub enum TypeExpr {
     Container(Kind, Box<TypeExpr>, Span),
     /// `HashMap<K, V>` / `SortedMap<K, V>`
     Map(MapKind, Box<TypeExpr>, Box<TypeExpr>, Span),
+    /// `Tuple<A, B, ...>`
+    Tuple(Vec<TypeExpr>, Span),
 }
 
 impl TypeExpr {
@@ -22,7 +24,8 @@ impl TypeExpr {
             | TypeExpr::Fn(_, _, s)
             | TypeExpr::Array(_, _, s)
             | TypeExpr::Container(_, _, s)
-            | TypeExpr::Map(_, _, _, s) => *s,
+            | TypeExpr::Map(_, _, _, s)
+            | TypeExpr::Tuple(_, s) => *s,
         }
     }
 }
@@ -295,6 +298,13 @@ pub enum Expr {
         entries: Vec<(Expr, Expr)>,
         span: Span,
     },
+    /// `Tuple<Error, i32>(err, 42)`: the type written out, then every
+    /// element in order. There is no shorter spelling.
+    TupleLit {
+        elems: Vec<TypeExpr>,
+        values: Vec<Expr>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -315,7 +325,8 @@ impl Expr {
             | Expr::ArrayLit { span: s, .. }
             | Expr::ArrayRepeat { span: s, .. }
             | Expr::ContainerLit { span: s, .. }
-            | Expr::MapLit { span: s, .. } => *s,
+            | Expr::MapLit { span: s, .. }
+            | Expr::TupleLit { span: s, .. } => *s,
         }
     }
 

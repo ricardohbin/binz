@@ -14,7 +14,7 @@ repository = "https://github.com/ricardohbin/binz"
 #   repository = "file:///Users/ricardo.bin/dev/binlanguage"
 [grammars.binz]
 repository = "https://github.com/ricardohbin/binz"
-rev = "ec3f1eefa5004023a5fe577d86bff76c826bf731"
+rev = "aa546dda056d137f41e63b16918a807efa102f6a"
 path = "editors/tree-sitter-binz"
 
 # `binz lsp`, started by `src/lib.rs`: completion, and the compiler's own
