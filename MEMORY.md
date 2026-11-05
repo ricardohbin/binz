@@ -155,6 +155,19 @@ does not go in.
   in `check_tuple` wherever a tuple type is written. Access is **`t[0]` with a
   literal index — my call**; no destructuring. Rationale and flags in
   `memory/2026-10-05.md`.
+- **`binz/http`, 2026-11-05 — his ask ("the way express does,
+  minimalist"), his choice of handler shape.** A handler is
+  `function(Request): Response` — **he picked return over Express's
+  `(req, res)` + `http.send`**. `http.server()`, `http.get/post/put/delete(app,
+  pattern, handler)`, `http.listen(app, port): Error` (serves forever, answers
+  only when it cannot start), `http.text`/`http.json` (a `Response` with its
+  Content-Type). `Request`/`Response` are binZ-declared structs (ids 1, 2) and
+  `Server` an opaque `Type::Server`, **all nameable only in a file importing
+  `binz/http`**. Two routes answering the same requests trap at
+  registration. A handler trap is a 500 and the server lives on. The VM
+  re-enters itself through `Vm.floor`. Single-threaded, `Connection: close`.
+  Branch `feat/webserver`, uncommitted. Rationale and flags in
+  `memory/2026-11-05.md`.
 - **`T{}` default literal, 2026-09-23 — his ask.** Every field or none:
   `Point{}` gives `0`, `0.0`, **`false`** (he proposed `true`; I pushed back,
   he chose `false`), `""`, a fresh empty container/map per slot, recursively.
@@ -166,7 +179,7 @@ does not go in.
   `find` and there is no resolution rule to learn. An import owns its binding for the
   whole *file* (nothing else in it may be named `io`); imports come first in
   a file.
-  Modules: `io` `string` `int` `float` `container` `map` `random` `test` `json`. **Naming, his call
+  Modules: `io` `string` `int` `float` `container` `map` `random` `test` `json` `http`. **Naming, his call
   2026-09-14: modules lowercase, members `camelCase` (`startsWith`,
   `canParse`), types `PascalCase`** — a test in `src/stdlib.rs` enforces it.
   **`size`, `find` and
@@ -322,6 +335,9 @@ does not go in.
   existed only because there were no tuples; now two error+value conventions
   coexist. Migrating needs `json.parse<T>(text)`. Flagged 2026-10-05.
 - **`t[0]` vs `t.0`, and no tuple destructuring** — my calls. Flagged 2026-10-05.
+- **`http.text`/`http.json` vs a `Response{...}` literal** — an overlap like
+  `T{}`; single-threaded server; repeated query keys keep the last; binds
+  0.0.0.0 like Express. Flagged 2026-11-05.
 - Whether the `fn` / `->` reserved-token diagnostics stay forever.
 - `.binzc` artifact extension was my extrapolation from his `.binz` request.
 

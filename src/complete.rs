@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::lexer::{describe, Lexer, Span, Tok, Token};
 use crate::stdlib;
-use crate::types::{error_struct, type_name};
+use crate::types::{error_struct, request_struct, response_struct, type_name, StructInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -74,18 +74,27 @@ impl Outline {
         self.imports.iter().filter(|i| i.local).map(|i| i.path.clone()).collect()
     }
 
-    /// The fields of struct `name`, counting the `Error` every file sees.
+    /// The fields of struct `name`, counting the ones binZ declares.
     fn fields_of(&self, name: &str) -> Option<Vec<(String, String)>> {
         if let Some(s) = self.structs.iter().find(|s| s.name == name) {
             return Some(s.fields.clone());
         }
-        if name == "Error" {
-            let e = error_struct();
-            return Some(
-                e.fields.iter().map(|f| (f.name.clone(), type_name(&f.ty, &[]))).collect(),
-            );
+        let s = self.builtin_structs().into_iter().find(|s| s.name == name)?;
+        Some(s.fields.iter().map(|f| (f.name.clone(), type_name(&f.ty, &[]))).collect())
+    }
+
+    /// `Error` everywhere, and `binz/http`'s two structs where it is imported.
+    fn builtin_structs(&self) -> Vec<StructInfo> {
+        let mut out = vec![error_struct()];
+        if self.imports_http() {
+            out.push(request_struct());
+            out.push(response_struct());
         }
-        None
+        out
+    }
+
+    fn imports_http(&self) -> bool {
+        self.imports.iter().any(|i| !i.local && i.path == ["http"])
     }
 }
 
@@ -442,7 +451,9 @@ pub fn complete(buf: &Buffer, line: u32, col: u32) -> Vec<Item> {
     for s in &out.structs {
         items.push(item(&s.name, ItemKind::Struct, "struct"));
     }
-    items.push(item("Error", ItemKind::Struct, "struct Error { reason: str, stacktrace: str, code: i32 }"));
+    for s in out.builtin_structs() {
+        items.push(item(&s.name, ItemKind::Struct, struct_detail(&s)));
+    }
     for k in STATEMENT_KEYWORDS {
         items.push(item(k, ItemKind::Keyword, "keyword"));
     }
@@ -482,9 +493,21 @@ fn types(out: &Outline) -> Vec<Item> {
     for s in &out.structs {
         items.push(item(&s.name, ItemKind::Struct, "struct"));
     }
-    items.push(item("Error", ItemKind::Struct, "struct"));
+    for s in out.builtin_structs() {
+        items.push(item(&s.name, ItemKind::Struct, "struct"));
+    }
+    if out.imports_http() {
+        items.push(item("Server", ItemKind::Type, "binz/http"));
+    }
     items.push(item("function", ItemKind::Keyword, "function type"));
     items
+}
+
+/// `struct Error { reason: str, stacktrace: str, code: i32 }`
+fn struct_detail(s: &StructInfo) -> String {
+    let fs: Vec<String> =
+        s.fields.iter().map(|f| format!("{}: {}", f.name, type_name(&f.ty, &[]))).collect();
+    format!("struct {} {{ {} }}", s.name, fs.join(", "))
 }
 
 /// After `import`: the two anchors, a standard library module, or a
@@ -675,6 +698,17 @@ mod tests {
     fn an_error_offers_its_three_fields() {
         let src = format!("{}function main(): i32 {{\n    var err: Error = Error{{}};\n    err.|\n}}\n", HEAD);
         assert_eq!(at(&src), vec!["reason", "stacktrace", "code"]);
+    }
+
+    #[test]
+    fn http_types_are_offered_where_http_is_imported() {
+        let src = "import binz/http;\nfunction h(req: Request): Response {\n    req.|\n}\n";
+        assert_eq!(at(src), vec!["method", "path", "params", "query", "headers", "body"]);
+        let src = "import binz/http;\nfunction main(): i32 {\n    const app: |\n}\n";
+        let got = at(src);
+        assert!(["Server", "Request", "Response"].iter().all(|t| got.contains(&t.to_string())), "{:?}", got);
+        let got = at(&format!("{}function main(): i32 {{\n    const app: |\n}}\n", HEAD));
+        assert!(!got.contains(&"Server".to_string()) && !got.contains(&"Request".to_string()));
     }
 
     #[test]

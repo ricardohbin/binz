@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use crate::bytecode::*;
 use crate::obj::{self, Handle};
-use crate::types::{ERROR_CODE, ERROR_REASON, ERROR_STACKTRACE};
+use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -78,6 +78,10 @@ pub struct Vm {
     /// operating system. A `Cell` because a native is handed `&self`, and
     /// randomness is the only one of them that has state at all.
     rng: Cell<u64>,
+    /// `exec` returns when a `return` leaves this many frames. `0` runs the
+    /// program to the end; a `binz/http` handler raises it to the frames
+    /// below its own, so the server gets control back once it has answered.
+    floor: usize,
 }
 
 macro_rules! rt {
@@ -122,6 +126,7 @@ impl Vm {
             redirect: Vec::new(),
             counts: if counting { vec![0; m.funcs.len()] } else { Vec::new() },
             rng: Cell::new(os_seed()),
+            floor: 0,
         };
         vm.mem.resize(m.funcs[func].n_slots as usize, Value::Void);
         vm.frames.push(Frame { func, pc: 0, fp: 0, sret: 0 });
@@ -384,46 +389,15 @@ impl Vm {
                     let args: Vec<Value> = self.stack.split_off(at);
                     let callee = self.pop();
                     match callee {
+                        Value::Native(idx) if idx >= HTTP_FIRST => {
+                            let v = self.call_http(idx, &args, m)?;
+                            self.stack.push(v);
+                        }
                         Value::Native(idx) => {
                             let v = self.call_native(idx, &args, m)?;
                             self.stack.push(v);
                         }
-                        Value::Fn(called) => {
-                            if !self.counts.is_empty() {
-                                self.counts[called as usize] += 1;
-                            }
-                            // A stub replaces the function itself, not one
-                            // call of it, so this is where it takes effect:
-                            // every path into it is redirected, however deep
-                            // in the module graph the call was written.
-                            let idx = match self.redirect.get(called as usize) {
-                                Some(to) => *to,
-                                None => called,
-                            };
-                            let meta = &m.funcs[idx as usize];
-                            let fp = self.mem.len();
-                            self.mem.resize(fp + meta.n_slots as usize, Value::Void);
-                            let mut ai = 0usize;
-                            let mut sret = 0usize;
-                            if meta.sret {
-                                sret = self.as_ptr(args[0].clone(), m)?;
-                                ai = 1;
-                            }
-                            let mut slot = 0usize;
-                            for (i, size) in meta.param_sizes.iter().enumerate() {
-                                let v = args[ai + i].clone();
-                                if *size == 1 {
-                                    self.mem[fp + slot] = v;
-                                } else {
-                                    let s = self.as_ptr(v, m)?;
-                                    for k in 0..*size as usize {
-                                        self.mem[fp + slot + k] = self.mem[s + k].clone();
-                                    }
-                                }
-                                slot += *size as usize;
-                            }
-                            self.frames.push(Frame { func: idx as usize, pc: 0, fp, sret });
-                        }
+                        Value::Fn(called) => self.enter(called, &args, m)?,
                         _ => rt!(self, m, "attempted to call a non-function value"),
                     }
                     continue;
@@ -433,7 +407,7 @@ impl Vm {
                     let v = self.pop();
                     let frame = self.frames.pop().unwrap();
                     self.mem.truncate(frame.fp);
-                    if self.frames.is_empty() {
+                    if self.frames.len() == self.floor {
                         return Ok(match v {
                             Value::I32(x) => x,
                             _ => 0,
@@ -448,6 +422,45 @@ impl Vm {
 
             self.frames.last_mut().unwrap().pc = pc;
         }
+    }
+
+    /// Pushes the frame of a call to function `called`, its arguments
+    /// already popped. The next instruction run is the callee's first.
+    fn enter(&mut self, called: u32, args: &[Value], m: &Module) -> Result<(), RuntimeError> {
+        if !self.counts.is_empty() {
+            self.counts[called as usize] += 1;
+        }
+        // A stub replaces the function itself, not one call of it, so this
+        // is where it takes effect: every path into it is redirected,
+        // however deep in the module graph the call was written.
+        let idx = match self.redirect.get(called as usize) {
+            Some(to) => *to,
+            None => called,
+        };
+        let meta = &m.funcs[idx as usize];
+        let fp = self.mem.len();
+        self.mem.resize(fp + meta.n_slots as usize, Value::Void);
+        let mut ai = 0usize;
+        let mut sret = 0usize;
+        if meta.sret {
+            sret = self.as_ptr(args[0].clone(), m)?;
+            ai = 1;
+        }
+        let mut slot = 0usize;
+        for (i, size) in meta.param_sizes.iter().enumerate() {
+            let v = args[ai + i].clone();
+            if *size == 1 {
+                self.mem[fp + slot] = v;
+            } else {
+                let s = self.as_ptr(v, m)?;
+                for k in 0..*size as usize {
+                    self.mem[fp + slot + k] = self.mem[s + k].clone();
+                }
+            }
+            slot += *size as usize;
+        }
+        self.frames.push(Frame { func: idx as usize, pc: 0, fp, sret });
+        Ok(())
     }
 
     /// Wraps a container-layer failure as a runtime error in the current
@@ -1006,4 +1019,237 @@ impl Vm {
             _ => rt!(self, m, "unknown stdlib function #{}", idx),
         })
     }
+
+    // ------------------------------------------------------------ binz/http
+
+    /// The `binz/http` natives. They are apart from `call_native` because
+    /// they need the machine mutably: `listen` runs handlers, and `text`,
+    /// `json` and `listen` write the struct they answer into the caller's
+    /// destination, which arrives as the first argument.
+    fn call_http(&mut self, idx: u32, args: &[Value], m: &Module) -> Result<Value, RuntimeError> {
+        Ok(match idx {
+            31 => obj::new_server(),
+            32..=35 => {
+                let method = ["GET", "POST", "PUT", "DELETE"][(idx - 32) as usize];
+                self.add_route(method, args, m)?;
+                Value::Void
+            }
+            36 => {
+                let dst = self.as_ptr(args[0].clone(), m)?;
+                let routes = match &args[1] {
+                    Value::Obj(h) => match &*h.borrow() {
+                        obj::Obj::Server(routes) => routes.clone(),
+                        _ => rt!(self, m, "`http.listen` expects a Server"),
+                    },
+                    _ => rt!(self, m, "`http.listen` expects a Server"),
+                };
+                let port = self.i32_arg(&args[2], m)?;
+                if !(0..=65535).contains(&port) {
+                    let why = format!("{} is not a port; a port is 0 to 65535", port);
+                    self.write_error(dst, Err(crate::json::Failure { code: 1, reason: why }), m);
+                    return Ok(Value::Ptr(dst));
+                }
+                let listener = match std::net::TcpListener::bind(("0.0.0.0", port as u16)) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let why = format!("cannot listen on port {}: {}", port, e);
+                        self.write_error(dst, Err(crate::json::Failure { code: 1, reason: why }), m);
+                        return Ok(Value::Ptr(dst));
+                    }
+                };
+                // One connection at a time, for as long as the process
+                // lives: a handler is binZ code, and the machine runs one
+                // function at a time.
+                for stream in listener.incoming() {
+                    if let Ok(stream) = stream {
+                        self.serve(stream, &routes, m);
+                    }
+                }
+                self.write_error(dst, Ok(()), m);
+                Value::Ptr(dst)
+            }
+            37 | 38 => {
+                let dst = self.as_ptr(args[0].clone(), m)?;
+                let status = self.i32_arg(&args[1], m)?;
+                let body = self.str_arg(&args[2], m)?;
+                let ctype = if idx == 37 { "text/plain; charset=utf-8" } else { "application/json" };
+                self.mem[dst + RESPONSE_STATUS as usize] = Value::I32(status);
+                self.mem[dst + RESPONSE_HEADERS as usize] =
+                    obj::str_map(vec![("Content-Type".into(), ctype.into())]);
+                self.mem[dst + RESPONSE_BODY as usize] = Value::Str(body);
+                Value::Ptr(dst)
+            }
+            _ => rt!(self, m, "unknown stdlib function #{}", idx),
+        })
+    }
+
+    /// `http.get(app, pattern, handler)` and its siblings.
+    fn add_route(&self, method: &'static str, args: &[Value], m: &Module) -> Result<(), RuntimeError> {
+        let pattern = self.str_arg(&args[1], m)?;
+        let handler = match args[2] {
+            Value::Fn(f) => f,
+            _ => rt!(self, m, "a route's handler must be a binZ function"),
+        };
+        let segs = self.checked(crate::http::parse_pattern(&pattern), m)?;
+        let h = match &args[0] {
+            Value::Obj(h) => h.clone(),
+            _ => rt!(self, m, "`http.{}` expects a Server", method.to_lowercase()),
+        };
+        let mut o = h.borrow_mut();
+        let routes = match &mut *o {
+            obj::Obj::Server(routes) => routes,
+            _ => rt!(self, m, "`http.{}` expects a Server", method.to_lowercase()),
+        };
+        // Two routes that match the same requests leave the second one
+        // unreachable, so it is refused rather than silently shadowed --
+        // whatever its `:name`s are called.
+        let shape = |segs: &[crate::http::Seg]| -> Vec<Option<String>> {
+            segs.iter()
+                .map(|s| match s {
+                    crate::http::Seg::Literal(l) => Some(l.clone()),
+                    crate::http::Seg::Param(_) => None,
+                })
+                .collect()
+        };
+        if let Some(r) = routes.iter().find(|r| r.method == method && shape(&r.segs) == shape(&segs)) {
+            rt!(
+                self,
+                m,
+                "`{} {}` is already answered by the route `{} {}`",
+                method,
+                pattern,
+                r.method,
+                r.pattern
+            );
+        }
+        routes.push(crate::http::Route {
+            method,
+            pattern: (*pattern).clone(),
+            segs,
+            handler,
+        });
+        Ok(())
+    }
+
+    /// Reads one request, runs the handler of the first route that matches
+    /// it, and writes the answer. Nothing a client sends can stop the
+    /// server: a request that is not HTTP gets a 4xx, a handler that traps a
+    /// 500, and the trap is reported on stderr.
+    fn serve(&mut self, mut stream: std::net::TcpStream, routes: &[crate::http::Route], m: &Module) {
+        use crate::http;
+        let plain = |s: &str| vec![("Content-Type".to_string(), s.to_string())];
+        let text = "text/plain; charset=utf-8";
+        let req = match http::read_request(&stream) {
+            Ok(r) => r,
+            Err(None) => return,
+            Err(Some((status, why))) => {
+                http::write_response(&mut stream, status, &plain(text), why, true);
+                return;
+            }
+        };
+        // `HEAD` is a `GET` without its body, as in every server.
+        let head = req.method == "HEAD";
+        let method = if head { "GET" } else { req.method.as_str() };
+        let mut allowed: Vec<&str> = Vec::new();
+        let mut found = None;
+        for r in routes {
+            if let Some(params) = http::match_route(&r.segs, &req.path) {
+                if r.method == method {
+                    found = Some((r.handler, params));
+                    break;
+                }
+                if !allowed.contains(&r.method) {
+                    allowed.push(r.method);
+                }
+            }
+        }
+        let (handler, params) = match found {
+            Some(f) => f,
+            None if allowed.is_empty() => {
+                http::write_response(&mut stream, 404, &plain(text), "not found", !head);
+                return;
+            }
+            None => {
+                let mut hs = plain(text);
+                hs.push(("Allow".into(), allowed.join(", ")));
+                http::write_response(&mut stream, 405, &hs, "method not allowed", !head);
+                return;
+            }
+        };
+        let (method, path) = (req.method.clone(), req.path.clone());
+        match self.call_handler(handler, req, params, m) {
+            Ok((status, headers, body)) => {
+                http::write_response(&mut stream, status, &headers, &body, !head)
+            }
+            Err(e) => {
+                eprintln!("{} {}: {}", method, path, e);
+                http::write_response(&mut stream, 500, &plain(text), "internal server error", !head);
+            }
+        }
+    }
+
+    /// Runs `handler` on a binZ `Request` built from `req`, and reads back
+    /// the `Response` it returned. On a trap the machine is put back exactly
+    /// as it was, so the next request starts clean.
+    fn call_handler(
+        &mut self,
+        handler: u32,
+        req: crate::http::Incoming,
+        params: Vec<(String, String)>,
+        m: &Module,
+    ) -> Result<(u16, Vec<(String, String)>, String), RuntimeError> {
+        let base = self.mem.len();
+        let depth = self.frames.len();
+        let stack = self.stack.len();
+        let dst = base + REQUEST_SIZE as usize;
+        self.mem.resize(dst + RESPONSE_SIZE as usize, Value::Void);
+        let at = |f: u32| base + f as usize;
+        self.mem[at(REQUEST_METHOD)] = Value::Str(Rc::new(req.method));
+        self.mem[at(REQUEST_PATH)] = Value::Str(Rc::new(req.path));
+        self.mem[at(REQUEST_PARAMS)] = obj::str_map(params);
+        self.mem[at(REQUEST_QUERY)] = obj::str_map(req.query);
+        self.mem[at(REQUEST_HEADERS)] = obj::str_map(req.headers);
+        self.mem[at(REQUEST_BODY)] = Value::Str(Rc::new(req.body));
+
+        let floor = self.floor;
+        self.floor = depth;
+        let ran = self.enter(handler, &[Value::Ptr(dst), Value::Ptr(base)], m).and_then(|_| self.exec(m));
+        self.floor = floor;
+        // `read_response` runs after the handler's frame is gone, so its
+        // complaint is pinned on the handler by hand.
+        let answer = ran.and_then(|_| {
+            self.read_response(dst, m).map_err(|e| RuntimeError {
+                func: m.funcs[handler as usize].name.clone(),
+                ..e
+            })
+        });
+        self.frames.truncate(depth);
+        self.stack.truncate(stack);
+        self.mem.truncate(base);
+        answer
+    }
+
+    fn read_response(
+        &self,
+        dst: usize,
+        m: &Module,
+    ) -> Result<(u16, Vec<(String, String)>, String), RuntimeError> {
+        let status = self.i32_arg(&self.mem[dst + RESPONSE_STATUS as usize], m)?;
+        if !(100..=599).contains(&status) {
+            rt!(self, m, "the handler answered status {}; an HTTP status is 100 to 599", status);
+        }
+        let headers = match &self.mem[dst + RESPONSE_HEADERS as usize] {
+            Value::Obj(h) => obj::str_pairs(h),
+            _ => rt!(self, m, "the handler's `Response` has no headers map"),
+        };
+        if let Some((k, v)) = headers.iter().find(|(k, v)| !crate::http::header_ok(k, v)) {
+            rt!(self, m, "the header `{}: {:?}` cannot be sent: a name is one token, and neither may break a line", k, v);
+        }
+        let body = self.str_arg(&self.mem[dst + RESPONSE_BODY as usize], m)?;
+        Ok((status as u16, headers, (*body).clone()))
+    }
 }
+
+/// The first `binz/http` native in `stdlib::NATIVES`; every one from here on
+/// is run by `Vm::call_http`.
+const HTTP_FIRST: u32 = 31;

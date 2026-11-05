@@ -165,7 +165,7 @@ fn compile_with(prog: &Program, mode: Mode) -> CResult<Module> {
         displays: prog.files.iter().map(|f| f.display.clone()).collect(),
         cur: prog.entry,
         // `Error` is struct 0 in every program, declared by binZ itself.
-        structs: vec![error_struct()],
+        structs: vec![error_struct(), request_struct(), response_struct()],
         sigs: Vec::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
@@ -438,6 +438,10 @@ impl Compiler {
         }
     }
 
+    fn imports_http(&self) -> bool {
+        self.files[self.cur].std_imports.iter().any(|m| m == "http")
+    }
+
     /// One binding per name per file, whichever kind of import claimed it.
     fn check_unbound(&self, name: &str, span: Span) -> CResult<()> {
         let sc = &self.files[self.cur];
@@ -457,6 +461,13 @@ impl Compiler {
         // `Error` is the one type every file can name without declaring it,
         // so it is in every file's table before any of the file's own.
         self.files[self.cur].struct_ids.insert("Error".to_string(), ERROR_ID);
+        // `binz/http`'s types are named only where the module is imported, so
+        // a file that does not serve anything keeps the words for itself.
+        let http = self.imports_http();
+        if http {
+            self.files[self.cur].struct_ids.insert("Request".to_string(), REQUEST_ID);
+            self.files[self.cur].struct_ids.insert("Response".to_string(), RESPONSE_ID);
+        }
         for item in &f.items {
             if let Item::Struct(sd) = item {
                 self.check_free(&sd.name, sd.span, "the name of a struct")?;
@@ -464,6 +475,16 @@ impl Compiler {
                     return Err(CompileError::new(
                         "`Error` is declared by binZ itself -- `reason: str, stacktrace: str, \
                          code: i32` -- so a program cannot declare another one",
+                        sd.span,
+                    ));
+                }
+                if http && matches!(sd.name.as_str(), "Request" | "Response" | "Server") {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is declared by `binz/http`, which this file imports, so the \
+                             file cannot declare another one",
+                            sd.name
+                        ),
                         sd.span,
                     ));
                 }
@@ -589,6 +610,7 @@ impl Compiler {
             Type::Ptr(_) => Err("an address means nothing outside this process".to_string()),
             Type::Fn(..) => Err("a function is not data".to_string()),
             Type::Tuple(_) => Err("a JSON value has no tuple; use an `@json` struct".to_string()),
+            Type::Server => Err("a server is not data".to_string()),
             Type::Void => unreachable!("a field is never `void`"),
         }
     }
@@ -778,8 +800,19 @@ impl Compiler {
                 "bool" => Type::Bool,
                 "str" => Type::Str,
                 "void" => Type::Void,
+                "Server" if self.imports_http() => Type::Server,
                 other => match self.files[self.cur].struct_ids.get(other) {
                     Some(id) => Type::Struct(*id),
+                    None if matches!(other, "Request" | "Response" | "Server") => {
+                        return Err(CompileError::new(
+                            format!(
+                                "unknown type `{}`; it is declared by `binz/http`, so write \
+                                 `import binz/http;`",
+                                other
+                            ),
+                            *sp,
+                        ))
+                    }
                     None => {
                         return Err(CompileError::new(format!("unknown type `{}`", other), *sp))
                     }
@@ -1998,7 +2031,7 @@ impl Compiler {
                 }
                 Ok(())
             }
-            Type::Ptr(_) | Type::Fn(..) => Err((path, t.clone())),
+            Type::Ptr(_) | Type::Fn(..) | Type::Server => Err((path, t.clone())),
             _ => Ok(()),
         }
     }
@@ -3088,10 +3121,11 @@ fn fn_named<'a>(f: &'a SourceFile, name: &str) -> Option<&'a FnDef> {
 /// The first struct a type mentions, however deeply. Struct ids are per file,
 /// so this is what decides whether a signature can cross a module boundary.
 ///
-/// `Error` is not one: binZ declares it, so every file can already name it.
+/// `Error`, `Request` and `Response` are not: binZ declares them, so every
+/// file can already name them -- the last two by importing `binz/http`.
 fn struct_in(t: &Type) -> Option<usize> {
     match t {
-        Type::Struct(id) if *id == ERROR_ID => None,
+        Type::Struct(id) if [ERROR_ID, REQUEST_ID, RESPONSE_ID].contains(id) => None,
         Type::Struct(id) => Some(*id),
         Type::Ptr(inner) | Type::Array(inner, _) | Type::Container(_, inner) => struct_in(inner),
         Type::Map(_, k, v) => struct_in(k).or_else(|| struct_in(v)),

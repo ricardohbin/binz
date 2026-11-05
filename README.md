@@ -461,6 +461,7 @@ words, and `container.add` does not stop you writing your own
 | `binz/random` | `f64` `i32` — [below](#binzrandom) |
 | `binz/test` | `equal` `calls` `fail`, reachable only from a test — [below](#tests) |
 | `binz/json` | `parse` `stringify`, over any `@json` struct — [below](#binzjson) |
+| `binz/http` | `server` `get` `post` `put` `delete` `listen` `text` `json` — [below](#binzhttp) |
 
 ### Which members are values
 
@@ -640,6 +641,96 @@ Rules, each one enforced at compile time where it can be:
 - `json.stringify` writes compact JSON with keys in declaration order. There is
   one spelling of a value, so there is no pretty-printer.
 - Numbers keep every digit: an `i64` field reads `9007199254740993` exactly.
+
+### binz/http
+
+A web server in the shape of Express, minus the parts binZ has no syntax for.
+A handler is a plain function from `Request` to `Response`, a route ties one
+method and one path to one handler, and `listen` serves them:
+
+```c
+import binz/io;
+import binz/http;
+
+function home(req: Request): Response {
+    return http.text(200, "hello from binZ");
+}
+
+function showUser(req: Request): Response {
+    return http.json(200, "{\"id\":\"" + req.params["id"] + "\"}");
+}
+
+function main(): i32 {
+    const app: Server = http.server();
+    http.get(app, "/", home);
+    http.get(app, "/users/:id", showUser);
+
+    const err: Error = http.listen(app, 3000);   // returns only if it cannot start
+    io.print(err.reason);
+    return 1;
+}
+```
+
+`Request` and `Response` are declared by binZ, like `Error`, but a file names
+them — and `Server` — only when it imports `binz/http`. They cross module
+boundaries, so handlers can live in `@root/routes/users.binz`:
+
+```c
+struct Request {
+    method: str,                    // "GET"
+    path: str,                      // "/users/42", without the query string
+    params: HashMap<str, str>,      // the route's `:name` segments, decoded
+    query: HashMap<str, str>,       // the query string, decoded
+    headers: HashMap<str, str>,     // names lowercased: req.headers["content-type"]
+    body: str,
+}
+
+struct Response {
+    status: i32,
+    headers: HashMap<str, str>,
+    body: str,
+}
+```
+
+| Member | Does |
+| --- | --- |
+| `http.server(): Server` | an empty routing table; a `Server` is a handle, so a copy shares its routes |
+| `http.get` `post` `put` `delete` `(app, pattern, handler)` | adds a route for that method |
+| `http.listen(app, port): Error` | serves forever, one request at a time; answers only when it cannot start (`code` 1) |
+| `http.text(status, body): Response` | a `Response` with `Content-Type: text/plain; charset=utf-8` |
+| `http.json(status, body): Response` | a `Response` with `Content-Type: application/json` |
+
+The rules:
+
+- **A handler answers by returning.** There is no `res.send`: binZ has no
+  methods and no closures, and a returned value is the one way out of a
+  function. Any header beyond `Content-Type` means writing the
+  `Response{ ... }` literal yourself.
+- **A pattern is a path.** It starts with `/`, and a `:name` segment captures
+  exactly one segment into `req.params`. A trailing slash is the same route,
+  and a query string is never part of one.
+- **Two routes cannot answer the same request.** `/u/:id` and `/u/:name` under
+  one method trap when the second is added, rather than leaving it
+  unreachable. The first route that matches runs.
+- No route for the path is a `404`; a route for the path under another method
+  is a `405` with `Allow`. `HEAD` is a `GET` without its body.
+- **A handler that traps is a `500`**, the trap is printed on stderr with the
+  method and path, and the server keeps serving.
+- No middleware: a check every handler needs is a function every handler
+  calls first.
+
+A handler is an ordinary function, so a test calls it with a `Request{}` and
+no socket at all:
+
+```c
+@test function readsTheId(): void {
+    const req: Request = Request{};
+    req.params["id"] = "42";
+    test.equal(showUser(req).status, 200);
+}
+```
+
+`examples/http.binz` is a runnable server with its tests.
 
 ### When a name is missing
 
@@ -899,6 +990,7 @@ src/bytecode.rs   instruction set, .binzc serialization, disassembler
 src/vm.rs         stack VM
 src/obj.rs        heap storage: Vector / LinkedList / Set / SortedSet / HashMap / SortedMap
 src/json.rs       binz/json: an RFC 8259 reader and a writer, driven by the artifact's schemas
+src/http.rs       binz/http: routes, and HTTP/1.1 off and onto a socket
 ```
 
 The compiler is one pass: because binZ has no inference beyond literal typing,
@@ -960,6 +1052,15 @@ writes into its caller's. Parsing builds a tree first and only then fills the
 destination, which is why a failure leaves it untouched; nesting past 512
 levels is refused rather than recursed into.
 
+`binz/http` is the one place the VM calls back into binZ. `http.listen` is a
+native that never returns while it serves: for each request it lays a
+`Request` and a `Response` destination on top of `mem`, pushes the handler's
+frame exactly as `OP_CALL` would, and runs the interpreter loop until that
+frame returns. A *floor* on the frame stack is what makes the nested loop
+stop there instead of at the end of the program. A trap unwinds `mem`, the
+operand stack and the frames back to where they were, so one failing request
+leaves nothing behind for the next.
+
 Runtime traps: division/remainder by zero, integer overflow, an index out of
 range, a map key that is not present, `pop` on an empty container, NaN
 used as a key, and dereferencing a pointer into a frame that has already been
@@ -980,7 +1081,9 @@ Slices, user-written generics, closures, exported types (a module exports its
 functions only), methods, enums/unions, bitwise operators, and
 unsigned integers. `binz/json` reads into structs only: no JSON object into a
 `HashMap<str, V>`, no optional fields. The standard library is a scratch: no file or process I/O
-beyond `io.print`, no time. `binz/random` cannot be seeded, so a
+beyond `io.print`, no time. `binz/http` serves one connection at a time and
+closes it after one request — no keep-alive, no TLS, no chunked request
+bodies, no static files — and binds every interface, as Express does. `binz/random` cannot be seeded, so a
 failing random case cannot be replayed. A test run has no setup, no teardown
 and no filter — `binz test <file>` runs everything it can reach. `cast<str>` formats
 scalars only, so a

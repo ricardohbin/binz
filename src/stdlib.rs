@@ -1,6 +1,6 @@
 //! The binZ standard library: `binz/io`, `binz/string`, `binz/int`,
-//! `binz/float`, `binz/container`, `binz/map`, `binz/random`, `binz/test`
-//! and `binz/json`.
+//! `binz/float`, `binz/container`, `binz/map`, `binz/random`, `binz/test`,
+//! `binz/json` and `binz/http`.
 //!
 //! A module is made visible with `import binz/<name>;` and every one of its
 //! members is then reached as `<name>.<member>`. That is the only spelling:
@@ -32,12 +32,12 @@
 //! `members_are_named_in_camel_case` test below holds the line, since a
 //! single `snake_case` slip would leave two conventions in one library.
 
-use crate::types::{Kind, Type};
+use crate::types::{handler_type, Kind, Type, ERROR_ID, RESPONSE_ID};
 
 /// Every module, in the order they are documented. The `binz/` prefix is
 /// part of the import path and is not repeated here.
 pub const MODULES: &[&str] =
-    &["io", "string", "int", "float", "container", "map", "random", "test", "json"];
+    &["io", "string", "int", "float", "container", "map", "random", "test", "json", "http"];
 
 pub type NativeSig = fn() -> Type;
 
@@ -60,6 +60,10 @@ macro_rules! sig {
 
 fn vec_of_str() -> Type {
     Type::Container(Kind::Vector, Box::new(Type::Str))
+}
+
+fn response() -> Type {
+    Type::Struct(RESPONSE_ID)
 }
 
 /// Monomorphic stdlib entries. **The index is the bytecode operand**, so
@@ -112,6 +116,22 @@ pub const NATIVES: &[Native] = &[
     // Fails the test that calls it, for the case equality cannot state: a
     // branch that should not have been reached.
     Native { module: "test", name: "fail", sig: sig!(Type::Str => Type::Void) },
+    // -------------------------------------------------------- binz/http
+    // `server` makes an empty routing table, one verb per HTTP method adds a
+    // route to it, and `listen` serves it -- forever, one request at a time.
+    // It returns only when it cannot start, with the `Error` saying why.
+    // A route is a literal path whose `:name` segments land in
+    // `req.params`; the first route registered that matches is the one run.
+    Native { module: "http", name: "server", sig: sig!( => Type::Server) },
+    Native { module: "http", name: "get", sig: sig!(Type::Server, Type::Str, handler_type() => Type::Void) },
+    Native { module: "http", name: "post", sig: sig!(Type::Server, Type::Str, handler_type() => Type::Void) },
+    Native { module: "http", name: "put", sig: sig!(Type::Server, Type::Str, handler_type() => Type::Void) },
+    Native { module: "http", name: "delete", sig: sig!(Type::Server, Type::Str, handler_type() => Type::Void) },
+    Native { module: "http", name: "listen", sig: sig!(Type::Server, Type::I32 => Type::Struct(ERROR_ID)) },
+    // A `Response` with its `Content-Type` already set. A response with any
+    // other header is a `Response{ ... }` literal.
+    Native { module: "http", name: "text", sig: sig!(Type::I32, Type::Str => response()) },
+    Native { module: "http", name: "json", sig: sig!(Type::I32, Type::Str => response()) },
 ];
 
 use crate::bytecode::*;
@@ -202,6 +222,9 @@ pub const MISUSED: &[(&str, &str, &str)] = &[
     ("json", "marshal", "write `json.stringify(value, &text)`"),
     ("json", "decode", "write `json.parse(text, &value)`"),
     ("json", "unmarshal", "write `json.parse(text, &value)`"),
+    ("http", "send", "a handler answers by returning its `Response`, as in `return http.text(200, body);`"),
+    ("http", "use", "binZ has no middleware; call the shared function at the top of each handler"),
+    ("http", "route", "register one method at a time: `http.get`, `http.post`, `http.put` or `http.delete`"),
 ];
 
 pub fn misused(module: &str, name: &str) -> Option<&'static str> {
@@ -301,6 +324,14 @@ mod tests {
             "random.f64",
             "random.i32",
             "test.fail",
+            "http.server",
+            "http.get",
+            "http.post",
+            "http.put",
+            "http.delete",
+            "http.listen",
+            "http.text",
+            "http.json",
         ];
         let actual: Vec<String> = (0..NATIVES.len() as u32).map(native_name).collect();
         assert_eq!(actual, expected);
