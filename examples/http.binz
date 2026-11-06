@@ -1,0 +1,77 @@
+// A web server: a handful of routes behind a port.
+//
+// A handler is `function(Request): Response`. It is an ordinary function,
+// so a test calls it directly -- no server, no socket.
+//
+//     binz run examples/http.binz
+//     curl localhost:3000/users/42
+
+import binz/io;
+import binz/http;
+import binz/int;
+import binz/map;
+import binz/test;
+
+function home(req: Request): Response {
+    return http.text(200, "hello from binZ");
+}
+
+// `:id` lands in `req.params`.
+function showUser(req: Request): Response {
+    const id: str = req.params["id"];
+    if (!int.canParse(id)) {
+        return http.text(400, "an id is a number");
+    }
+    return http.json(200, "{\"id\":" + id + "}");
+}
+
+// `?q=...` lands in `req.query`, which holds only what was sent.
+function search(req: Request): Response {
+    if (!map.contains(req.query, "q")) {
+        return http.text(400, "search needs `q`");
+    }
+    return http.text(200, "searching for " + req.query["q"]);
+}
+
+function createUser(req: Request): Response {
+    return http.text(201, "created " + req.body);
+}
+
+// Any other header means writing the whole `Response`.
+function removeUser(req: Request): Response {
+    const headers: HashMap<str, str> = HashMap<str, str>{ "X-Removed": req.params["id"] };
+    return Response{ status: 204, headers: headers, body: "" };
+}
+
+function main(): i32 {
+    const app: Server = http.server();
+    http.get(app, "/", home);
+    http.get(app, "/users/:id", showUser);
+    http.get(app, "/search", search);
+    http.post(app, "/users", createUser);
+    http.delete(app, "/users/:id", removeUser);
+
+    io.print("listening on http://localhost:3000");
+    const err: Error = http.listen(app, 3000);
+    io.print(err.reason);
+    return 1;
+}
+
+@test function answersAUserAsJson(): void {
+    const req: Request = Request{};
+    req.params["id"] = "42";
+    const res: Response = showUser(req);
+    test.equal(res.status, 200);
+    test.equal(res.headers["Content-Type"], "application/json");
+    test.equal(res.body, "{\"id\":42}");
+}
+
+@test function refusesAnIdThatIsNotANumber(): void {
+    const req: Request = Request{};
+    req.params["id"] = "ana";
+    test.equal(showUser(req).status, 400);
+}
+
+@test function searchNeedsAQuery(): void {
+    test.equal(search(Request{}).status, 400);
+}

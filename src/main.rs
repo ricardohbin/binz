@@ -3,6 +3,7 @@ mod bytecode;
 mod compiler;
 mod complete;
 mod error;
+mod http;
 mod json;
 mod lexer;
 mod loader;

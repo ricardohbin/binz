@@ -1,5 +1,6 @@
 //! Heap storage behind `Vector<T>`, `LinkedList<T>`, `Set<T>`,
-//! `SortedSet<T>`, `HashMap<K, V>` and `SortedMap<K, V>`.
+//! `SortedSet<T>`, `HashMap<K, V>`, `SortedMap<K, V>` and `binz/http`'s
+//! `Server`.
 //!
 //! Every one of them is reached through a reference-counted handle, so a
 //! container value is a single slot and copying it aliases the same storage.
@@ -22,6 +23,8 @@ pub enum Obj {
     SortedSet(Vec<Value>),
     Map(MapData),
     SortedMap(SortedMapData),
+    /// The routes of a `binz/http` server, in the order they were added.
+    Server(Vec<crate::http::Route>),
 }
 
 pub type OResult<T> = Result<T, String>;
@@ -150,6 +153,9 @@ pub fn deep_copy(v: &Value) -> Value {
                 }
                 Obj::SortedMap(out)
             }
+            // Not a container: `copy` never reaches one, and a server
+            // copied by assignment aliases its routes like any handle.
+            Obj::Server(_) => return v.clone(),
         }),
         other => other.clone(),
     }
@@ -1006,6 +1012,35 @@ pub fn new_container(kind: u8, values: Vec<Value>) -> OResult<Value> {
     }))
 }
 
+pub fn new_server() -> Value {
+    handle(Obj::Server(Vec::new()))
+}
+
+/// A `HashMap<str, str>` holding `pairs`, in order.
+pub fn str_map(pairs: Vec<(String, String)>) -> Value {
+    let mut mp = MapData::default();
+    for (k, v) in pairs {
+        // A string is always a valid key.
+        let _ = mp.set(Value::Str(Rc::new(k)), Value::Str(Rc::new(v)));
+    }
+    handle(Obj::Map(mp))
+}
+
+/// The entries of a `HashMap<str, str>`, in insertion order.
+pub fn str_pairs(h: &Handle) -> Vec<(String, String)> {
+    match &*h.borrow() {
+        Obj::Map(mp) => mp
+            .entries
+            .iter()
+            .filter_map(|(k, v)| match (k, v) {
+                (Value::Str(k), Value::Str(v)) => Some(((**k).clone(), (**v).clone())),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn kind_name(o: &Obj) -> &'static str {
     match o {
         Obj::Vector(_) => "Vector",
@@ -1014,6 +1049,7 @@ pub fn kind_name(o: &Obj) -> &'static str {
         Obj::SortedSet(_) => "SortedSet",
         Obj::Map(_) => "HashMap",
         Obj::SortedMap(_) => "SortedMap",
+        Obj::Server(_) => "Server",
     }
 }
 
@@ -1028,6 +1064,7 @@ pub fn obj_len(h: &Handle) -> usize {
         Obj::Set(s) => s.len(),
         Obj::Map(mp) => mp.len(),
         Obj::SortedMap(sm) => sm.len(),
+        Obj::Server(routes) => routes.len(),
     }
 }
 
@@ -1074,6 +1111,7 @@ pub fn obj_get(h: &Handle, i: usize) -> OResult<Value> {
         Obj::Map(_) | Obj::SortedMap(_) => {
             Err(format!("a {} is indexed by key, not by position", kind_name(&o)))
         }
+        Obj::Server(_) => Err("a Server is not indexed".into()),
     }
 }
 
@@ -1202,6 +1240,8 @@ pub fn obj_clear(h: &Handle) {
         Obj::Set(s) => s.clear(),
         Obj::Map(mp) => mp.clear(),
         Obj::SortedMap(sm) => sm.clear(),
+        // The compiler never clears a server; there is nothing to do.
+        Obj::Server(_) => {}
     }
 }
 

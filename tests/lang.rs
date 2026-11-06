@@ -2690,3 +2690,245 @@ fn a_tuple_crosses_a_module_boundary_when_its_elements_do() {
     );
     assert!(e.contains("`geo.origin` is typed with the struct `P`, which `@root/geo.binz` does not export"), "{}", e);
 }
+
+// ---------------------------------------------------------------- binz/http
+
+/// A `binz run` child that is killed when the test ends, pass or panic -- a
+/// server never exits on its own.
+struct Served(std::process::Child);
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts `main` (written after the `binz/http` import) on a free port,
+/// handed to it as `PORT`, and waits until it accepts connections.
+fn serve(name: &str, src: &str) -> (Served, u16) {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let src = format!("import binz/http;\nimport binz/io;\n{}", src.replace("PORT", &port.to_string()));
+    let path = write_temp(name, &src);
+    let child = Command::new(env!("CARGO_BIN_EXE_binz"))
+        .arg("run")
+        .arg(&path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let served = Served(child);
+    for _ in 0..200 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return (served, port);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("the server never started listening on {}", port);
+}
+
+/// Sends `raw` as is and answers the whole response.
+fn exchange(port: u16, raw: &str) -> String {
+    use std::io::Read;
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.write_all(raw.as_bytes()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    out
+}
+
+fn get(port: u16, target: &str) -> String {
+    exchange(port, &format!("GET {} HTTP/1.1\r\nHost: x\r\n\r\n", target))
+}
+
+const ROUTES: &str = "\
+function home(req: Request): Response { return http.text(200, \"home\"); }
+function user(req: Request): Response {
+  return http.json(200, \"{\\\"id\\\":\\\"\" + req.params[\"id\"] + \"\\\"}\");
+}
+function create(req: Request): Response {
+  return http.text(201, req.method + \" \" + req.path + \" \" + req.body + \" \" + req.headers[\"x-who\"]);
+}
+function search(req: Request): Response { return http.text(200, \"q=\" + req.query[\"q\"]); }
+function custom(req: Request): Response {
+  const h: HashMap<str, str> = HashMap<str, str>{ \"X-Custom\": \"yes\" };
+  return Response{ status: 202, headers: h, body: \"\" };
+}
+function trap(req: Request): Response { return http.text(200, req.query[\"absent\"]); }
+function main(): i32 {
+  const app: Server = http.server();
+  http.get(app, \"/\", home);
+  http.get(app, \"/users/:id\", user);
+  http.post(app, \"/users\", create);
+  http.get(app, \"/search\", search);
+  http.put(app, \"/custom\", custom);
+  http.get(app, \"/trap\", trap);
+  const err: Error = http.listen(app, PORT);
+  io.print(err.reason);
+  return 1;
+}
+";
+
+#[test]
+fn http_routes_answer_over_a_socket() {
+    let (_server, port) = serve("http_routes", ROUTES);
+
+    let r = get(port, "/");
+    assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{}", r);
+    assert!(r.contains("Content-Type: text/plain; charset=utf-8\r\n"), "{}", r);
+    assert!(r.contains("Content-Length: 4\r\n") && r.ends_with("\r\n\r\nhome"), "{}", r);
+
+    // A `:name` segment is decoded into `req.params`, and a trailing slash
+    // is the same route.
+    let r = get(port, "/users/ana%20lu/");
+    assert!(r.contains("Content-Type: application/json\r\n"), "{}", r);
+    assert!(r.ends_with("{\"id\":\"ana lu\"}"), "{}", r);
+
+    let r = exchange(port, "POST /users HTTP/1.1\r\nX-Who: me\r\nContent-Length: 3\r\n\r\nana");
+    assert!(r.starts_with("HTTP/1.1 201 Created\r\n"), "{}", r);
+    assert!(r.ends_with("POST /users ana me"), "{}", r);
+
+    let r = get(port, "/search?q=two+words&x=1");
+    assert!(r.ends_with("q=two words"), "{}", r);
+
+    let r = exchange(port, "PUT /custom HTTP/1.1\r\n\r\n");
+    assert!(r.starts_with("HTTP/1.1 202 Accepted\r\n") && r.contains("X-Custom: yes\r\n"), "{}", r);
+}
+
+#[test]
+fn http_answers_what_no_route_does() {
+    let (_server, port) = serve("http_misses", ROUTES);
+    let r = get(port, "/nope");
+    assert!(r.starts_with("HTTP/1.1 404 Not Found\r\n"), "{}", r);
+    let r = exchange(port, "DELETE /users HTTP/1.1\r\n\r\n");
+    assert!(r.starts_with("HTTP/1.1 405 Method Not Allowed\r\n") && r.contains("Allow: POST\r\n"), "{}", r);
+    let r = exchange(port, "HEAD / HTTP/1.1\r\n\r\n");
+    assert!(r.starts_with("HTTP/1.1 200 OK\r\n") && r.ends_with("\r\n\r\n"), "{}", r);
+    let r = exchange(port, "nonsense\r\n\r\n");
+    assert!(r.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{}", r);
+}
+
+#[test]
+fn http_a_trapping_handler_is_a_500_and_the_server_lives_on() {
+    let (mut server, port) = serve("http_trap", ROUTES);
+    let r = get(port, "/trap");
+    assert!(r.starts_with("HTTP/1.1 500 Internal Server Error\r\n"), "{}", r);
+    let r = get(port, "/");
+    assert!(r.ends_with("home"), "{}", r);
+    // The trap is reported where the operator sees it.
+    let _ = server.0.kill();
+    let mut err = String::new();
+    use std::io::Read;
+    server.0.stderr.take().unwrap().read_to_string(&mut err).unwrap();
+    assert!(err.contains("GET /trap: runtime error in `trap`: key \"absent\""), "{}", err);
+}
+
+#[test]
+fn http_listen_answers_an_error_when_it_cannot_start() {
+    let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let out = run_raw_ok(
+        "http_taken",
+        &format!(
+            "import binz/http;\nimport binz/io;\nfunction main(): i32 {{\n  const app: Server = http.server();\n  \
+             const err: Error = http.listen(app, {});\n  io.print(cast<str>(err.code));\n  return 0;\n}}\n",
+            port
+        ),
+    );
+    assert_eq!(out, "1\n");
+}
+
+#[test]
+fn http_routes_are_checked_when_they_are_added() {
+    let head = "import binz/http;\nfunction h(req: Request): Response { return http.text(200, \"\"); }\n";
+    let cases = [
+        ("http.get(app, \"users\", h);", "the route `users` must start with `/`"),
+        ("http.get(app, \"/a/:\", h);", "has a `:` with no name"),
+        ("http.get(app, \"/a?b=1\", h);", "the query string arrives in `req.query`"),
+        (
+            "http.get(app, \"/u/:id\", h); http.get(app, \"/u/:name\", h);",
+            "`GET /u/:name` is already answered by the route `GET /u/:id`",
+        ),
+    ];
+    for (i, (body, want)) in cases.iter().enumerate() {
+        let e = run_raw_err(
+            &format!("http_route_{}", i),
+            &format!("{}function main(): i32 {{ const app: Server = http.server(); {} return 0; }}", head, body),
+        );
+        assert!(e.contains(want), "{}\n{}", body, e);
+    }
+    // The same path under two methods is two routes.
+    run_raw_ok(
+        "http_route_methods",
+        &format!(
+            "{}function main(): i32 {{ const app: Server = http.server(); http.get(app, \"/u\", h); \
+             http.post(app, \"/u\", h); return 0; }}",
+            head
+        ),
+    );
+}
+
+#[test]
+fn http_types_belong_to_the_import() {
+    let e = run_raw_err("http_noimport", "function h(req: Request): i32 { return 0; }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("unknown type `Request`; it is declared by `binz/http`, so write `import binz/http;`"), "{}", e);
+    // Without the import the names are free for a program's own structs ...
+    run_raw_ok("http_own_request", "struct Request { id: i32 }\nfunction main(): i32 { const r: Request = Request{ id: 1 }; return 0; }");
+    // ... and with it they are taken.
+    let e = run_raw_err("http_own_server", "import binz/http;\nstruct Server { id: i32 }\nfunction main(): i32 { return 0; }");
+    assert!(e.contains("`Server` is declared by `binz/http`"), "{}", e);
+}
+
+#[test]
+fn http_a_handler_has_one_signature() {
+    let e = run_raw_err(
+        "http_sig",
+        "import binz/http;\nfunction h(req: Request): str { return \"\"; }\n\
+         function main(): i32 { const app: Server = http.server(); http.get(app, \"/\", h); return 0; }",
+    );
+    assert!(e.contains("expected `function(Request): Response`, found `function(Request): str`"), "{}", e);
+    let e = run_raw_err("http_send", "import binz/http;\nfunction main(): i32 { http.send(1); return 0; }");
+    assert!(e.contains("a handler answers by returning its `Response`"), "{}", e);
+    let e = run_raw_err(
+        "http_server_default",
+        "import binz/http;\nstruct S { app: Server }\nfunction main(): i32 { const s: S = S{}; return 0; }",
+    );
+    assert!(e.contains("`app` is a `Server`, which has none"), "{}", e);
+}
+
+#[test]
+fn http_a_handler_is_tested_by_calling_it() {
+    tests_pass(
+        "http_handler_test",
+        &[(
+            "main.binz",
+            "import binz/http;\nimport binz/test;\n\
+             function user(req: Request): Response { return http.text(200, \"user \" + req.params[\"id\"]); }\n\
+             @test function readsTheId(): void {\n\
+               const req: Request = Request{};\n\
+               req.params[\"id\"] = \"7\";\n\
+               const res: Response = user(req);\n\
+               test.equal(res.status, 200);\n\
+               test.equal(res.body, \"user 7\");\n\
+             }\n",
+        )],
+    );
+}
+
+#[test]
+fn http_a_handler_crosses_a_module_boundary() {
+    run_project_ok(
+        "http_module",
+        &[
+            (
+                "main.binz",
+                "import binz/http;\nimport @root/routes/users.binz;\nfunction main(): i32 {\n  \
+                 const app: Server = http.server();\n  http.get(app, \"/users/:id\", users.show);\n  return 0;\n}\n",
+            ),
+            (
+                "routes/users.binz",
+                "import binz/http;\nfunction show(req: Request): Response { return http.text(200, req.params[\"id\"]); }\n",
+            ),
+        ],
+    );
+}

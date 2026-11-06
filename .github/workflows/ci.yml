@@ -37,10 +37,16 @@ jobs:
       # has no `main` by design, which is what makes a module testable on its
       # own, and `binz run` refuses it. Run the ones that are programs, and say
       # out loud which ones were skipped so a missing `main` can't hide here.
+      #
+      # A server is a program that never exits, so it is skipped too; the
+      # step below still compiles it and runs its tests, and `tests/lang.rs`
+      # serves real requests.
       - name: Run the examples
         run: |
           for f in examples/*.binz; do
-            if grep -q '^function main' "$f"; then
+            if grep -q '^import binz/http;' "$f"; then
+              echo "--- skip $f (a server, runs until stopped)"
+            elif grep -q '^function main' "$f"; then
               echo "--- run $f"
               cargo run --quiet --locked -- run "$f"
             else

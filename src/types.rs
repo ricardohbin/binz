@@ -90,6 +90,9 @@ pub enum Type {
     /// copied by value exactly like a struct whose fields have no names. If
     /// one of them is an `Error`, it is the first.
     Tuple(Vec<Type>),
+    /// `binz/http`'s `Server`: a handle to a routing table, nameable only in
+    /// a file that imports `binz/http`. Copying one aliases the same routes.
+    Server,
 }
 
 impl Type {
@@ -152,13 +155,11 @@ pub const ERROR_STACKTRACE: u32 = 1;
 pub const ERROR_CODE: u32 = 2;
 pub const ERROR_SIZE: u32 = 3;
 
+fn field(name: &str, ty: Type, offset: u32) -> FieldInfo {
+    FieldInfo { name: name.to_string(), ty, offset, key: name.to_string() }
+}
+
 pub fn error_struct() -> StructInfo {
-    let field = |name: &str, ty: Type, offset: u32| FieldInfo {
-        name: name.to_string(),
-        ty,
-        offset,
-        key: name.to_string(),
-    };
     StructInfo {
         name: "Error".to_string(),
         fields: vec![
@@ -170,6 +171,68 @@ pub fn error_struct() -> StructInfo {
         laid_out: true,
         json: false,
     }
+}
+
+/// `binz/http`'s two structs. Like `Error` they are declared by binZ, with
+/// a fixed id and a fixed layout the virtual machine reads and writes field
+/// by field -- but a file names them only when it imports `binz/http`.
+///
+/// A handler is `function(Request): Response`. `params` holds the `:name`
+/// segments of the route that matched, `query` the decoded query string, and
+/// `headers` the request headers with their names lowercased.
+pub const REQUEST_ID: usize = 1;
+pub const REQUEST_METHOD: u32 = 0;
+pub const REQUEST_PATH: u32 = 1;
+pub const REQUEST_PARAMS: u32 = 2;
+pub const REQUEST_QUERY: u32 = 3;
+pub const REQUEST_HEADERS: u32 = 4;
+pub const REQUEST_BODY: u32 = 5;
+pub const REQUEST_SIZE: u32 = 6;
+
+pub const RESPONSE_ID: usize = 2;
+pub const RESPONSE_STATUS: u32 = 0;
+pub const RESPONSE_HEADERS: u32 = 1;
+pub const RESPONSE_BODY: u32 = 2;
+pub const RESPONSE_SIZE: u32 = 3;
+
+fn str_map() -> Type {
+    Type::Map(MapKind::Hash, Box::new(Type::Str), Box::new(Type::Str))
+}
+
+pub fn request_struct() -> StructInfo {
+    StructInfo {
+        name: "Request".to_string(),
+        fields: vec![
+            field("method", Type::Str, REQUEST_METHOD),
+            field("path", Type::Str, REQUEST_PATH),
+            field("params", str_map(), REQUEST_PARAMS),
+            field("query", str_map(), REQUEST_QUERY),
+            field("headers", str_map(), REQUEST_HEADERS),
+            field("body", Type::Str, REQUEST_BODY),
+        ],
+        size: REQUEST_SIZE,
+        laid_out: true,
+        json: false,
+    }
+}
+
+pub fn response_struct() -> StructInfo {
+    StructInfo {
+        name: "Response".to_string(),
+        fields: vec![
+            field("status", Type::I32, RESPONSE_STATUS),
+            field("headers", str_map(), RESPONSE_HEADERS),
+            field("body", Type::Str, RESPONSE_BODY),
+        ],
+        size: RESPONSE_SIZE,
+        laid_out: true,
+        json: false,
+    }
+}
+
+/// The handler type every `http.get` / `http.post` / ... route takes.
+pub fn handler_type() -> Type {
+    Type::Fn(vec![Type::Struct(REQUEST_ID)], Box::new(Type::Struct(RESPONSE_ID)))
 }
 
 /// Renders a type using the concrete source syntax, so diagnostics show
@@ -197,5 +260,6 @@ pub fn type_name(t: &Type, structs: &[StructInfo]) -> String {
             let es: Vec<String> = elems.iter().map(|e| type_name(e, structs)).collect();
             format!("Tuple<{}>", es.join(", "))
         }
+        Type::Server => "Server".into(),
     }
 }
